@@ -235,6 +235,172 @@ pub fn on_event(app: &mut App, event: Event) {
     }
 }
 
+/// The job cards, bottom left above the player bar: the song being worked
+/// on with its cover, how far along the job is, and a way to stop it.
+pub fn panel(app: &mut App, ctx: &egui::Context) {
+    app.twerkz.jobs.retain(|job| {
+        job.ended
+            .is_none_or(|ended| job.error || ended.elapsed().as_secs() < 15)
+    });
+    if app.twerkz.jobs.is_empty() {
+        return;
+    }
+    ctx.request_repaint_after(std::time::Duration::from_millis(500));
+    let palette = app.palette;
+    let art = app.backend.art().clone();
+    let mut actions = Vec::new();
+    egui::Area::new(egui::Id::new("twerkz-downloads"))
+        .anchor(
+            Align2::LEFT_BOTTOM,
+            vec2(16.0, -(theme::PLAYER_BAR_HEIGHT + 16.0)),
+        )
+        .order(egui::Order::Foreground)
+        .show(ctx, |ui| {
+            ui.spacing_mut().item_spacing.y = 8.0;
+            for job in &app.twerkz.jobs {
+                card(ui, &palette, &art, job, &mut actions);
+            }
+        });
+    for action in actions {
+        app.actions.push(crate::model::Action::Twerkz(action));
+    }
+}
+
+fn card(
+    ui: &mut Ui,
+    palette: &theme::Palette,
+    art: &crate::images::ArtLoader,
+    job: &Job,
+    actions: &mut Vec<Action>,
+) {
+    Frame::new()
+        .fill(palette.overlay)
+        .stroke(Stroke::new(1.0, palette.outline))
+        .corner_radius(CornerRadius::same(theme::RADIUS))
+        .inner_margin(Margin::same(12))
+        .shadow(egui::epaint::Shadow {
+            offset: [0, 4],
+            blur: 16,
+            spread: 0,
+            color: palette.shadow,
+        })
+        .show(ui, |ui| {
+            ui.set_width(330.0);
+            ui.horizontal_top(|ui| {
+                let (rect, _) = ui.allocate_exact_size(vec2(52.0, 52.0), egui::Sense::hover());
+                crate::ui::widgets::paint_cover(ui, palette, job.cover.as_deref(), rect, 6.0, Icon::Music, Some(art));
+                let badge = egui::Rect::from_center_size(rect.right_bottom() - vec2(4.0, 4.0), vec2(20.0, 20.0));
+                if job.running {
+                    ui.painter()
+                        .rect_filled(rect, CornerRadius::same(6), egui::Color32::from_black_alpha(110));
+                    egui::Spinner::new()
+                        .size(20.0)
+                        .color(egui::Color32::WHITE)
+                        .paint_at(ui, egui::Rect::from_center_size(rect.center(), vec2(20.0, 20.0)));
+                } else {
+                    let (icon, color) = if job.error {
+                        (Icon::CircleAlert, palette.danger)
+                    } else {
+                        (Icon::CircleCheck, palette.accent)
+                    };
+                    ui.painter().circle_filled(badge.center(), 10.0, palette.overlay);
+                    theme::paint_icon(ui, icon, badge, 18.0, color);
+                }
+                ui.add_space(6.0);
+                ui.vertical(|ui| {
+                    ui.set_width(ui.available_width() - 30.0);
+                    truncated(ui, &job.heading, theme::medium(11.5), palette.dim);
+                    let title = if job.running || job.title.is_empty() {
+                        job.title.as_str()
+                    } else if job.total > 1 {
+                        job.summary.as_str()
+                    } else {
+                        job.title.as_str()
+                    };
+                    truncated(ui, title, theme::semibold(14.0), palette.text);
+                    if job.running && !job.artist.is_empty() {
+                        truncated(ui, &job.artist, theme::regular(12.5), palette.secondary);
+                    }
+                    let detail = if job.running {
+                        progress_text(job)
+                    } else if job.total > 1 && !job.title.is_empty() {
+                        String::new()
+                    } else {
+                        job.summary.clone()
+                    };
+                    if !detail.is_empty() {
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(detail)
+                                    .font(theme::medium(11.5))
+                                    .color(if job.error && !job.running { palette.danger } else { palette.secondary }),
+                            )
+                            .wrap(),
+                        );
+                    }
+                    if job.running && job.total > 1 {
+                        ui.add_space(3.0);
+                        let fraction = job.done as f32 / job.total as f32;
+                        let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), 4.0), egui::Sense::hover());
+                        ui.painter().rect_filled(bar, CornerRadius::same(2), palette.surface_active);
+                        let mut filled = bar;
+                        filled.set_width(bar.width() * fraction);
+                        ui.painter().rect_filled(filled, CornerRadius::same(2), palette.accent);
+                    }
+                    if !job.running
+                        && let Some(folder) = &job.folder
+                    {
+                        ui.add_space(4.0);
+                        if small_button(ui, palette, "Open folder") {
+                            actions.push(Action::OpenFolder(folder.clone()));
+                        }
+                    }
+                });
+                let tip = if job.running { "Cancel" } else { "Close" };
+                if theme::icon_button(ui, Icon::X, 14.0, palette.secondary, palette.text, tip).clicked() {
+                    actions.push(if job.running {
+                        Action::Cancel(job.id)
+                    } else {
+                        Action::Dismiss(job.id)
+                    });
+                }
+            });
+        });
+}
+
+/// "3 of 20 · 2 added · 1 failed" while a job runs.
+fn progress_text(job: &Job) -> String {
+    if job.total <= 1 {
+        return String::new();
+    }
+    let mut parts = vec![format!("{} of {}", job.done, job.total)];
+    let verb = match job.kind {
+        Kind::Download => "saved",
+        Kind::Import => "added",
+    };
+    if job.saved > 0 || matches!(job.kind, Kind::Import) {
+        parts.push(format!("{} {verb}", job.saved));
+    }
+    if job.failed > 0 {
+        parts.push(format!("{} failed", job.failed));
+    }
+    parts.join(" · ")
+}
+
+fn small_button(ui: &mut Ui, palette: &theme::Palette, label: &str) -> bool {
+    ui.add(
+        egui::Button::new(
+            egui::RichText::new(label)
+                .font(theme::medium(12.0))
+                .color(palette.text),
+        )
+        .fill(palette.surface)
+        .stroke(Stroke::new(1.0, palette.outline))
+        .corner_radius(CornerRadius::same(6)),
+    )
+    .clicked()
+}
+
 /// Romanized lyrics for the song on screen.
 struct Romaji {
     uri: String,
