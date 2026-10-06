@@ -3673,7 +3673,19 @@ impl App {
         if self.library.playlists.is_loading() {
             return;
         }
-        self.library.playlists = Loadable::Loading;
+        // twerkz: the last run's list stays on screen while this one loads.
+        let shown = matches!(self.library.playlists, Loadable::Loaded(_));
+        let keep = shown && self.twerkz.library.showing_cached;
+        let cached = (!shown)
+            .then(|| crate::twerkz::library::load(&self.dirs, self.user_id()))
+            .flatten();
+        self.twerkz.library.showing_cached = keep || cached.is_some();
+        self.twerkz.library.pending.clear();
+        if let Some(playlists) = cached {
+            self.library.playlists = Loadable::Loaded(playlists);
+        } else if !keep {
+            self.library.playlists = Loadable::Loading;
+        }
         self.library.playlists_next = None;
         self.library.playlists_asked = None;
         self.library.playlists_generation += 1;
@@ -5263,14 +5275,32 @@ impl App {
                 Ok(page) => {
                     self.library.playlists_asked = None;
                     let next_offset = page.next_offset();
-                    match &mut self.library.playlists {
-                        Loadable::Loaded(existing) if offset > 0 => existing.extend(page.items),
-                        slot => *slot = Loadable::Loaded(page.items),
+                    if self.twerkz.library.showing_cached {
+                        let gathered = &mut self.twerkz.library.pending;
+                        if offset == 0 {
+                            gathered.clear();
+                        }
+                        gathered.extend(page.items);
+                        if next_offset.is_none() {
+                            self.library.playlists =
+                                Loadable::Loaded(std::mem::take(gathered));
+                            self.twerkz.library.showing_cached = false;
+                        }
+                    } else {
+                        match &mut self.library.playlists {
+                            Loadable::Loaded(existing) if offset > 0 => {
+                                existing.extend(page.items)
+                            }
+                            slot => *slot = Loadable::Loaded(page.items),
+                        }
                     }
                     self.library.playlists_next = next_offset;
                     if next_offset.is_some() {
                         self.load_more(Page::Home);
                     } else {
+                        if let Some(playlists) = self.library.playlists.get() {
+                            crate::twerkz::library::store(&self.dirs, self.user_id(), playlists);
+                        }
                         // Load folder order after all playlists arrive.
                         self.backend.send(Command::Rootlist);
                     }
@@ -5292,7 +5322,10 @@ impl App {
                 }
                 Err(error) => {
                     self.library.playlists_asked = None;
-                    if offset == 0 {
+                    if std::mem::take(&mut self.twerkz.library.showing_cached) {
+                        // The cached list stays; it is the best there is.
+                        self.twerkz.library.pending.clear();
+                    } else if offset == 0 {
                         self.library.playlists = Loadable::Failed(error.to_string());
                     } else {
                         self.toast_error(
