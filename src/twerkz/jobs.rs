@@ -37,6 +37,41 @@ pub fn root(dirs: &AppDirs) -> PathBuf {
     dirs.state.join("twerkz")
 }
 
+/// Imported songs, played by spotifast and matched by Spotify.
+pub fn local_songs_dir(dirs: &AppDirs) -> PathBuf {
+    root(dirs).join("local songs")
+}
+
+/// The local songs folder exists and is one of the scanned local folders, so
+/// imports index and play like any other local file. The folders Spotify's
+/// desktop app plays local files from are offered once too, so songs it
+/// added to playlists play here as well.
+pub fn ensure_local_songs_folder(dirs: &AppDirs, settings: &mut crate::settings::Settings) {
+    let folder = local_songs_dir(dirs);
+    if std::fs::create_dir_all(&folder).is_err() {
+        return;
+    }
+    let offered_file = root(dirs).join("offered-folders.txt");
+    let offered = std::fs::read_to_string(&offered_file).unwrap_or_default();
+    let mut offered: Vec<String> = offered.lines().map(str::to_string).collect();
+    let mut changed = false;
+    let mut wanted = vec![folder.to_string_lossy().into_owned()];
+    for path in wanted {
+        if offered.contains(&path) {
+            continue;
+        }
+        offered.push(path.clone());
+        if !settings.local_folders.contains(&path) {
+            settings.local_folders.push(path);
+            changed = true;
+        }
+    }
+    let _ = std::fs::write(&offered_file, offered.join("\n"));
+    // A legacy proxy password is migrated before settings may be rewritten.
+    if changed && !settings.proxy_password_legacy {
+        settings.save(&dirs.settings_file());
+    }
+}
 
 
 pub fn tools_dir(dirs: &AppDirs) -> PathBuf {
@@ -96,7 +131,170 @@ pub fn start(request: Request, backend: Backend) {
                 (backend.emit)(Event::Romanized { uri, result });
             });
         }
+        Request::AddLocal {
+            id,
+            playlist_id,
+            uris,
+        } => {
+            tokio::spawn(async move {
+                let count = uris.len();
+                let result = async {
+                    let session = backend
+                        .engine
+                        .as_ref()
+                        .map(|engine| engine.session().clone())
+                        .ok_or_else(|| anyhow!("connect to Spotify first"))?;
+                    super::playlist::append(&session, &playlist_id, &uris).await?;
+                    Ok::<_, anyhow::Error>(if count == 1 {
+                        "Added 1 song".to_string()
+                    } else {
+                        format!("Added {count} songs")
+                    })
+                }
+                .await
+                .map_err(|error| format!("{error:#}"));
+                (backend.emit)(Event::AddedLocal {
+                    id,
+                    playlist_id,
+                    result,
+                });
+            });
+        }
+        Request::ImportPreview { id, url } => {
+            tokio::spawn(async move {
+                let result = async {
+                    let cx = context(&backend, id, Arc::default()).await?;
+                    let found = super::import::find(&cx, &url).await;
+                    let _ = tokio::fs::remove_dir_all(&cx.work_dir).await;
+                    found
+                }
+                .await
+                .map_err(|error| format!("{error:#}"));
+                (backend.emit)(Event::ImportPreview { id, result });
+            });
+        }
+        Request::Import {
+            id,
+            playlist_id,
+            songs,
+        } => {
+            let cancel = Arc::new(AtomicBool::new(false));
+            if let Ok(mut held) = CANCELS.lock() {
+                held.insert(id, cancel.clone());
+            }
+            tokio::spawn(async move {
+                let emit = backend.emit.clone();
+                let total = songs.len();
+                let say = |index: usize, step: Step| {
+                    emit(Event::Imported {
+                        id,
+                        playlist_id: playlist_id.clone(),
+                        index,
+                        total,
+                        step,
+                    })
+                };
+                let result = import(id, &playlist_id, songs, cancel.clone(), &backend, &say).await;
+                forget(id);
+                say(
+                    total,
+                    Step::Finished(
+                        result
+                            .map(|()| cancel.load(Ordering::Relaxed))
+                            .map_err(|error| format!("{error:#}")),
+                    ),
+                );
+            });
+        }
     }
+}
+
+/// Downloads the songs a few at a time and adds each to the playlist as
+/// soon as the ones before it are in, so the playlist keeps their order.
+async fn import(
+    id: u64,
+    playlist_id: &str,
+    songs: Vec<super::import::Preview>,
+    cancel: Arc<AtomicBool>,
+    backend: &Backend,
+    say: &(dyn Fn(usize, Step) + Sync),
+) -> Result<()> {
+    let session = backend
+        .engine
+        .as_ref()
+        .map(|engine| engine.session().clone())
+        .ok_or_else(|| anyhow!("connect to Spotify first"))?;
+    let cx = Arc::new(context(backend, id, cancel.clone()).await?);
+    let folder = local_songs_dir(&backend.dirs);
+    let songs = Arc::new(songs);
+    let mut pending = std::collections::VecDeque::new();
+    let mut next = 0;
+    loop {
+        while pending.len() < PARALLEL && next < songs.len() && !cancel.load(Ordering::Relaxed) {
+            let (cx, songs, folder, index) = (cx.clone(), songs.clone(), folder.clone(), next);
+            pending.push_back((
+                index,
+                tokio::spawn(async move {
+                    let song = &songs[index];
+                    super::import::download(&cx, song, &song.title, &song.artist, &folder).await
+                }),
+            ));
+            next += 1;
+        }
+        let Some((index, handle)) = pending.pop_front() else {
+            break;
+        };
+        let song = &songs[index];
+        say(
+            index,
+            Step::Working {
+                title: song.title.clone(),
+                artist: song.artist.clone(),
+                cover: song.thumbnail.clone(),
+            },
+        );
+        let downloaded = handle.await.map_err(|error| anyhow!("{error}")).and_then(|file| file);
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
+        let added = async {
+            let file = downloaded?;
+            let uri = crate::localfiles::uri_of(&file).map_err(|error| anyhow!(error))?;
+            super::playlist::append(&session, playlist_id, &[uri]).await
+        }
+        .await;
+        match added {
+            Ok(()) => say(index, Step::Added),
+            Err(error) => {
+                log::warn!("import of {} failed: {error:#}", song.url);
+                say(index, Step::Failed(format!("{error:#}")));
+            }
+        }
+    }
+    for (_, handle) in pending {
+        handle.abort();
+    }
+    let _ = tokio::fs::remove_dir_all(&cx.work_dir).await;
+    Ok(())
+}
+
+/// Tools set up and a fresh work folder for job `id`.
+async fn context(backend: &Backend, id: u64, cancel: Arc<AtomicBool>) -> Result<Ctx> {
+    let http = backend.http.clone().map_err(|error| anyhow!(error))?;
+    let emit = backend.emit.clone();
+    let tools = super::tools::ensure(&http, &tools_dir(&backend.dirs), &move |text| {
+        emit(Event::ImportStatus { id, text })
+    })
+    .await?;
+    let work_dir = backend.dirs.cache.join("twerkz-work").join(id.to_string());
+    tokio::fs::create_dir_all(&work_dir).await?;
+    Ok(Ctx {
+        http,
+        tools,
+        lyrics_dir: backend.dirs.lyrics_cache_dir(),
+        work_dir,
+        cancel,
+    })
 }
 
 fn forget(id: u64) {

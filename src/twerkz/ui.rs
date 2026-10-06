@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use egui::{Align2, CornerRadius, Frame, Margin, Stroke, Ui, vec2};
 
+use super::import::{Collection, Found, Preview};
 use super::{Event, Format, Request, Step};
 use crate::app::App;
 use crate::backend::Command;
@@ -21,6 +22,31 @@ pub enum Action {
     Cancel(u64),
     Dismiss(u64),
     OpenFolder(PathBuf),
+    OpenImport {
+        playlist_id: String,
+        playlist_name: String,
+    },
+}
+
+/// The header button that adds YouTube, SoundCloud or local songs to a
+/// playlist the account owns.
+pub fn import_button(ui: &mut Ui, app: &mut App, playlist: &crate::api::models::Playlist) {
+    let palette = app.palette;
+    if theme::icon_button(
+        ui,
+        Icon::MusicPlus,
+        26.0,
+        palette.secondary,
+        palette.text,
+        "Add songs from YouTube, SoundCloud or local files",
+    )
+    .clicked()
+    {
+        app.actions.push(crate::model::Action::Twerkz(Action::OpenImport {
+            playlist_id: playlist.id.clone(),
+            playlist_name: playlist.name.clone(),
+        }));
+    }
 }
 
 #[derive(Default)]
@@ -28,8 +54,110 @@ pub struct State {
     jobs: Vec<Job>,
     next_id: u64,
     last_folder: Option<PathBuf>,
+    import: Option<Import>,
     romaji: Option<Romaji>,
     romaji_on: bool,
+    reloaded: Option<Instant>,
+}
+
+struct Import {
+    id: u64,
+    playlist_id: String,
+    playlist_name: String,
+    url: String,
+    stage: Stage,
+    tab: Tab,
+    filter: String,
+    picked: std::collections::BTreeSet<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Tab {
+    YouTube,
+    SoundCloud,
+    Local,
+}
+
+impl Tab {
+    const ALL: [Tab; 3] = [Tab::YouTube, Tab::SoundCloud, Tab::Local];
+
+    fn label(self) -> &'static str {
+        match self {
+            Tab::YouTube => "YouTube",
+            Tab::SoundCloud => "SoundCloud",
+            Tab::Local => "Local",
+        }
+    }
+
+    /// A link this tab takes, made whole.
+    fn link(self, text: &str) -> Option<String> {
+        let url = super::import::normalize_link(text)?;
+        let soundcloud = url.to_lowercase().contains("soundcloud.com");
+        match self {
+            Tab::YouTube if !soundcloud => Some(url),
+            Tab::SoundCloud if soundcloud => Some(url),
+            _ => None,
+        }
+    }
+}
+
+enum Stage {
+    Link { error: Option<String> },
+    Loading(String),
+    /// One song: its names can be changed before it is added.
+    Song {
+        preview: Preview,
+        title: String,
+        artist: String,
+    },
+    /// A playlist, album or set: every song's names can be changed.
+    List { collection: Collection, rows: Vec<Row> },
+    /// The songs being added, or added.
+    Running {
+        rows: Vec<Row>,
+        done: Option<Result<String, String>>,
+    },
+    /// Local songs added.
+    Done(Result<String, String>),
+}
+
+struct Row {
+    preview: Preview,
+    title: String,
+    artist: String,
+    state: RowState,
+    editing: bool,
+    picked: bool,
+}
+
+impl Row {
+    fn new(preview: Preview) -> Self {
+        Row {
+            title: preview.title.clone(),
+            artist: preview.artist.clone(),
+            preview,
+            state: RowState::Waiting,
+            editing: false,
+            picked: true,
+        }
+    }
+
+    /// The song as it will be saved.
+    fn song(&self) -> Preview {
+        Preview {
+            title: self.title.trim().to_string(),
+            artist: self.artist.trim().to_string(),
+            ..self.preview.clone()
+        }
+    }
+}
+
+#[derive(Clone, PartialEq)]
+enum RowState {
+    Waiting,
+    Working,
+    Added,
+    Failed(String),
 }
 
 #[derive(Clone, PartialEq)]
@@ -149,7 +277,831 @@ pub fn apply(app: &mut App, action: Action) {
                 app.toast_error(format!("Couldn't open the folder: {error}"));
             }
         }
+        Action::OpenImport {
+            playlist_id,
+            playlist_name,
+        } => {
+            app.twerkz.next_id += 1;
+            app.twerkz.import = Some(Import {
+                id: app.twerkz.next_id,
+                playlist_id,
+                playlist_name,
+                url: String::new(),
+                stage: Stage::Link { error: None },
+                tab: Tab::YouTube,
+                filter: String::new(),
+                picked: Default::default(),
+            });
+        }
     }
+}
+
+/// Starts adding `rows` to the playlist, with a card that follows it.
+fn start_import(app: &mut App, rows: &[Row]) -> Option<Request> {
+    let import = app.twerkz.import.as_mut()?;
+    // A fresh id, so a later import from the same dialog is its own job.
+    app.twerkz.next_id += 1;
+    import.id = app.twerkz.next_id;
+    let mut job = Job::new(
+        import.id,
+        Kind::Import,
+        format!("Adding to “{}”", import.playlist_name),
+        "Starting…",
+    );
+    job.total = rows.len();
+    job.cover = rows.first().and_then(|row| row.preview.thumbnail.clone());
+    app.twerkz.jobs.push(job);
+    Some(Request::Import {
+        id: import.id,
+        playlist_id: import.playlist_id.clone(),
+        songs: rows.iter().map(Row::song).collect(),
+    })
+}
+
+fn on_import_event(app: &mut App, event: Event) {
+    match &event {
+        Event::Imported {
+            id,
+            playlist_id,
+            index,
+            total,
+            step,
+        } => {
+            on_imported(app, *id, playlist_id, *index, *total, step);
+        }
+        Event::ImportStatus { id, text } => {
+            if let Some(job) = app.twerkz.jobs.iter_mut().find(|job| job.id == *id)
+                && job.running
+                && job.done == 0
+            {
+                job.title = text.clone();
+            }
+        }
+        _ => {}
+    }
+    let Some(import) = app.twerkz.import.as_mut() else {
+        return;
+    };
+    match event {
+        Event::ImportPreview { id, result } if id == import.id => {
+            import.stage = match result {
+                Ok(Found::Song(preview)) => Stage::Song {
+                    title: preview.title.clone(),
+                    artist: preview.artist.clone(),
+                    preview,
+                },
+                Ok(Found::Collection(collection)) => Stage::List {
+                    rows: collection.entries.iter().cloned().map(Row::new).collect(),
+                    collection,
+                },
+                Err(error) => Stage::Link { error: Some(error) },
+            };
+        }
+        Event::ImportStatus { id, text } if id == import.id => {
+            if let Stage::Loading(status) = &mut import.stage {
+                *status = text;
+            }
+        }
+        Event::Imported { id, index, step, .. } if id == import.id => {
+            if let Stage::Running { rows, done } = &mut import.stage {
+                match step {
+                    Step::Working { .. } => {
+                        if let Some(row) = rows.get_mut(index) {
+                            row.state = RowState::Working;
+                        }
+                    }
+                    Step::Added => {
+                        if let Some(row) = rows.get_mut(index) {
+                            row.state = RowState::Added;
+                        }
+                    }
+                    Step::Failed(error) => {
+                        if let Some(row) = rows.get_mut(index) {
+                            row.state = RowState::Failed(error);
+                        }
+                    }
+                    Step::Finished(result) => {
+                        for row in rows.iter_mut() {
+                            if row.state == RowState::Working {
+                                row.state = RowState::Waiting;
+                            }
+                        }
+                        let added = rows.iter().filter(|row| row.state == RowState::Added).count();
+                        *done = Some(match result {
+                            Ok(true) => Err(format!("Cancelled · {}", songs(added, "added"))),
+                            Ok(false) => import_summary(rows),
+                            Err(error) => Err(error),
+                        });
+                    }
+                }
+            }
+        }
+        Event::AddedLocal {
+            id,
+            playlist_id,
+            result,
+        } if id == import.id => {
+            if result.is_ok() {
+                import.picked.clear();
+                app.actions.push(crate::model::Action::Reload(crate::model::Page::Playlist(
+                    playlist_id,
+                )));
+            }
+            import.stage = Stage::Done(result);
+        }
+        _ => {}
+    }
+}
+
+fn songs(count: usize, what: &str) -> String {
+    match count {
+        1 => format!("1 song {what}"),
+        n => format!("{n} songs {what}"),
+    }
+}
+
+fn import_summary(rows: &[Row]) -> Result<String, String> {
+    let added = rows.iter().filter(|row| row.state == RowState::Added).count();
+    let failed: Vec<&Row> = rows
+        .iter()
+        .filter(|row| matches!(row.state, RowState::Failed(_)))
+        .collect();
+    match (added, failed.len()) {
+        (_, 0) => Ok(songs(added, "added")),
+        (0, 1) => Err(match &failed[0].state {
+            RowState::Failed(error) => error.clone(),
+            _ => String::new(),
+        }),
+        (added, failed) => Err(format!("{} · {failed} failed", songs(added, "added"))),
+    }
+}
+
+fn on_imported(app: &mut App, id: u64, playlist_id: &str, index: usize, total: usize, step: &Step) {
+    let reload = crate::model::Action::Reload(crate::model::Page::Playlist(playlist_id.to_string()));
+    let Some(job) = app.twerkz.jobs.iter_mut().find(|job| job.id == id) else {
+        return;
+    };
+    job.total = total;
+    match step {
+        Step::Working { title, artist, cover } => {
+            job.title = title.clone();
+            job.artist = artist.clone();
+            if cover.is_some() {
+                job.cover = cover.clone();
+            }
+            job.done = index;
+        }
+        Step::Added => {
+            job.saved += 1;
+            job.done = index + 1;
+            // The playlist shows each song as it lands, a few seconds apart.
+            if app
+                .twerkz
+                .reloaded
+                .is_none_or(|last| last.elapsed().as_secs() >= 3)
+            {
+                app.twerkz.reloaded = Some(Instant::now());
+                app.actions.push(reload);
+            }
+        }
+        Step::Failed(_) => {
+            job.failed += 1;
+            job.done = index + 1;
+        }
+        Step::Finished(result) => {
+            let added = job.saved;
+            match result {
+                Ok(cancelled) => {
+                    let mut parts = vec![if *cancelled {
+                        "Cancelled".to_string()
+                    } else {
+                        "Done".to_string()
+                    }];
+                    parts.push(songs(added, "added"));
+                    if job.failed > 0 {
+                        parts.push(format!("{} failed", job.failed));
+                    }
+                    let error = job.failed > 0;
+                    job.end(error, parts.join(" · "));
+                }
+                Err(error) => job.end(true, error.clone()),
+            }
+            if added > 0 {
+                app.actions.push(reload);
+                // The engine reads its local files when it starts, so the
+                // new songs play only after a restart, which also rescans.
+                app.actions.push(crate::model::Action::RestartEngine);
+            }
+        }
+    }
+}
+
+/// The import dialog: YouTube and SoundCloud take a link to a song or a
+/// whole list, whose names can be changed first; Local lists the songs in
+/// the local folders.
+fn import_dialog(app: &mut App, ctx: &egui::Context) {
+    let palette = app.palette;
+    let locale = app.locale;
+    let Some(playlist_id) = app.twerkz.import.as_ref().map(|import| import.playlist_id.clone()) else {
+        return;
+    };
+    let index = app.local_index.clone();
+    let in_playlist: std::collections::HashSet<String> = app
+        .playlist_pages
+        .get(&playlist_id)
+        .map(|page| {
+            page.items
+                .items
+                .iter()
+                .filter_map(|row| row.playable().map(|item| item.uri().to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    let art = app.backend.art().clone();
+    let Some(import) = app.twerkz.import.as_mut() else {
+        return;
+    };
+    let mut close = false;
+    let mut send = None;
+    let mut start: Option<Vec<Row>> = None;
+    let mut cancel = None;
+    let frame = Frame::new()
+        .fill(palette.overlay)
+        .stroke(Stroke::new(1.0, palette.outline))
+        .corner_radius(CornerRadius::same(theme::RADIUS + 4))
+        .inner_margin(Margin::same(24))
+        .shadow(egui::epaint::Shadow {
+            offset: [0, 10],
+            blur: 40,
+            spread: 0,
+            color: palette.shadow,
+        });
+    let modal = egui::Modal::new(egui::Id::new("twerkz-import"))
+        .frame(frame)
+        .backdrop_color(egui::Color32::from_black_alpha(if palette.dark { 150 } else { 80 }))
+        .show(ctx, |ui| {
+            ui.set_width(500.0);
+            theme::text(ui, "Add songs", theme::bold(20.0), palette.text);
+            ui.add_space(4.0);
+            theme::text(
+                ui,
+                format!("to {}", import.playlist_name),
+                theme::medium(13.0),
+                palette.secondary,
+            );
+            ui.add_space(12.0);
+            let locked = matches!(import.stage, Stage::Loading(_) | Stage::Running { done: None, .. });
+            ui.horizontal(|ui| {
+                for tab in Tab::ALL {
+                    if theme::soft_button(ui, &palette, None, tab.label(), import.tab == tab).clicked()
+                        && !locked
+                        && import.tab != tab
+                    {
+                        import.tab = tab;
+                        import.url.clear();
+                        import.stage = Stage::Link { error: None };
+                    }
+                }
+            });
+            ui.add_space(14.0);
+            match &mut import.stage {
+                Stage::Link { .. } if import.tab == Tab::Local => {
+                    local_list(
+                        ui,
+                        &palette,
+                        locale,
+                        index.as_deref(),
+                        &in_playlist,
+                        &mut import.filter,
+                        &mut import.picked,
+                    );
+                    ui.add_space(14.0);
+                    let count = import.picked.len();
+                    let mut add = false;
+                    ui.allocate_ui_with_layout(vec2(ui.available_width(), 34.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let label = match count {
+                            0 => "Add songs".to_string(),
+                            1 => "Add 1 song".to_string(),
+                            n => format!("Add {n} songs"),
+                        };
+                        add = ui
+                            .add_enabled_ui(count > 0, |ui| theme::pill_button(ui, &palette, &label, true))
+                            .inner
+                            .clicked();
+                        close |= theme::pill_button(ui, &palette, "Cancel", false).clicked();
+                    });
+                    if add {
+                        send = Some(Request::AddLocal {
+                            id: import.id,
+                            playlist_id: import.playlist_id.clone(),
+                            uris: import.picked.iter().cloned().collect(),
+                        });
+                        import.stage = Stage::Loading("Adding to the playlist…".to_string());
+                    }
+                }
+                Stage::Link { error } => {
+                    let hint = match import.tab {
+                        Tab::SoundCloud => "Paste a SoundCloud song, set or profile link",
+                        _ => "Paste a YouTube song or playlist link",
+                    };
+                    let field = field(ui, &palette, locale, "twerkz-import-url", &mut import.url, hint, true);
+                    let entered = field.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                    if let Some(error) = error {
+                        ui.add_space(8.0);
+                        wrapped(ui, error.as_str(), theme::medium(12.5), palette.danger);
+                    }
+                    ui.add_space(16.0);
+                    let mut go = entered;
+                    ui.allocate_ui_with_layout(vec2(ui.available_width(), 34.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        go |= theme::pill_button(ui, &palette, "Find", true).clicked();
+                        close |= theme::pill_button(ui, &palette, "Cancel", false).clicked();
+                    });
+                    if go {
+                        match import.tab.link(&import.url) {
+                            Some(url) => {
+                                send = Some(Request::ImportPreview { id: import.id, url });
+                                import.stage = Stage::Loading("Reading the link…".to_string());
+                            }
+                            None => {
+                                *error = Some(format!("That isn't a {} link.", import.tab.label()));
+                            }
+                        }
+                    }
+                }
+                Stage::Song {
+                    preview,
+                    title,
+                    artist,
+                } => {
+                    ui.horizontal(|ui| {
+                        crate::ui::widgets::cover(ui, &palette, preview.thumbnail.as_deref(), 64.0, 6.0, Icon::Music);
+                        ui.add_space(6.0);
+                        ui.vertical(|ui| {
+                            ui.add_space(6.0);
+                            truncated(ui, &preview.title, theme::semibold(14.5), palette.text);
+                            theme::text(
+                                ui,
+                                format!(
+                                    "{} · {}:{:02}",
+                                    preview.source,
+                                    preview.seconds / 60,
+                                    preview.seconds % 60
+                                ),
+                                theme::medium(12.0),
+                                palette.secondary,
+                            );
+                        });
+                    });
+                    ui.add_space(14.0);
+                    theme::text(ui, "Title", theme::semibold(12.0), palette.secondary);
+                    field(ui, &palette, locale, "twerkz-import-title", title, "Title", true);
+                    ui.add_space(10.0);
+                    theme::text(ui, "Artist", theme::semibold(12.0), palette.secondary);
+                    field(ui, &palette, locale, "twerkz-import-artist", artist, "Artist", false);
+                    ui.add_space(16.0);
+                    let ready = !title.trim().is_empty() && !artist.trim().is_empty();
+                    let (mut add, mut back) = (false, false);
+                    ui.allocate_ui_with_layout(vec2(ui.available_width(), 34.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        add = ui
+                            .add_enabled_ui(ready, |ui| theme::pill_button(ui, &palette, "Download and add", true))
+                            .inner
+                            .clicked();
+                        back = theme::pill_button(ui, &palette, "Back", false).clicked();
+                    });
+                    if add {
+                        let mut row = Row::new(preview.clone());
+                        row.title = title.clone();
+                        row.artist = artist.clone();
+                        start = Some(vec![row]);
+                    } else if back {
+                        import.stage = Stage::Link { error: None };
+                    }
+                }
+                Stage::List { collection, rows } => {
+                    ui.horizontal(|ui| {
+                        crate::ui::widgets::cover(ui, &palette, collection.cover.as_deref(), 64.0, 6.0, Icon::ListMusic);
+                        ui.add_space(6.0);
+                        ui.vertical(|ui| {
+                            ui.add_space(6.0);
+                            truncated(ui, &collection.title, theme::semibold(14.5), palette.text);
+                            let mut detail = format!("{} · {}", collection.source, songs(rows.len(), ""));
+                            if collection.mix {
+                                detail = format!("{} · first songs of a mix", detail.trim_end());
+                            }
+                            theme::text(ui, detail.trim_end(), theme::medium(12.0), palette.secondary);
+                        });
+                    });
+                    ui.add_space(10.0);
+                    song_rows(ui, &palette, locale, &art, rows, true);
+                    ui.add_space(14.0);
+                    let picked = rows.iter().filter(|row| row.picked).count();
+                    let ready = picked > 0
+                        && rows
+                            .iter()
+                            .filter(|row| row.picked)
+                            .all(|row| !row.title.trim().is_empty() && !row.artist.trim().is_empty());
+                    let (mut add, mut back) = (false, false);
+                    ui.allocate_ui_with_layout(vec2(ui.available_width(), 34.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let label = format!("Download and add {}", songs(picked, "").trim_end());
+                        add = ui
+                            .add_enabled_ui(ready, |ui| theme::pill_button(ui, &palette, &label, true))
+                            .inner
+                            .clicked();
+                        back = theme::pill_button(ui, &palette, "Back", false).clicked();
+                    });
+                    if add {
+                        start = Some(
+                            std::mem::take(rows)
+                                .into_iter()
+                                .filter(|row| row.picked)
+                                .map(|row| Row { editing: false, ..row })
+                                .collect(),
+                        );
+                    } else if back {
+                        import.stage = Stage::Link { error: None };
+                    }
+                }
+                Stage::Running { rows, done } => {
+                    song_rows(ui, &palette, locale, &art, rows, false);
+                    ui.add_space(12.0);
+                    match done {
+                        None => {
+                            let added = rows.iter().filter(|row| row.state == RowState::Added).count();
+                            ui.horizontal(|ui| {
+                                ui.add(egui::Spinner::new().size(14.0).color(palette.accent));
+                                theme::text(
+                                    ui,
+                                    format!("{} of {} added", added, rows.len()),
+                                    theme::medium(13.0),
+                                    palette.text,
+                                );
+                            });
+                            ui.add_space(12.0);
+                            ui.allocate_ui_with_layout(vec2(ui.available_width(), 34.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                close |= theme::pill_button(ui, &palette, "Hide", true).clicked();
+                                if theme::pill_button(ui, &palette, "Cancel import", false).clicked() {
+                                    cancel = Some(import.id);
+                                }
+                            });
+                        }
+                        Some(result) => {
+                            outcome(ui, &palette, result);
+                            ui.add_space(16.0);
+                            ui.allocate_ui_with_layout(vec2(ui.available_width(), 34.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                close |= theme::pill_button(ui, &palette, "Done", true).clicked();
+                                if theme::pill_button(ui, &palette, "Add more", false).clicked() {
+                                    import.url.clear();
+                                    import.stage = Stage::Link { error: None };
+                                }
+                            });
+                        }
+                    }
+                }
+                Stage::Loading(status) => {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Spinner::new().color(palette.accent));
+                        theme::text(ui, status.as_str(), theme::medium(13.5), palette.text);
+                    });
+                    ui.add_space(8.0);
+                }
+                Stage::Done(result) => {
+                    outcome(ui, &palette, result);
+                    ui.add_space(16.0);
+                    let failed = result.is_err();
+                    ui.allocate_ui_with_layout(vec2(ui.available_width(), 34.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        close |= theme::pill_button(ui, &palette, "Done", true).clicked();
+                        if theme::pill_button(ui, &palette, if failed { "Try again" } else { "Add more" }, false)
+                            .clicked()
+                        {
+                            import.stage = Stage::Link { error: None };
+                        }
+                    });
+                }
+            }
+            if locked {
+                ctx.request_repaint_after(std::time::Duration::from_millis(250));
+            }
+        });
+    let loading = app
+        .twerkz
+        .import
+        .as_ref()
+        .is_some_and(|import| matches!(import.stage, Stage::Loading(_)));
+    if modal.should_close() && !loading {
+        close = true;
+    }
+    if let Some(rows) = start {
+        if let Some(request) = start_import(app, &rows)
+            && let Some(import) = app.twerkz.import.as_mut()
+        {
+            import.stage = Stage::Running { rows, done: None };
+            send = Some(request);
+        }
+    }
+    if let Some(id) = cancel {
+        app.actions.push(crate::model::Action::Twerkz(Action::Cancel(id)));
+    }
+    if let Some(request) = send {
+        app.backend.send(Command::Twerkz(request));
+    }
+    if close {
+        app.twerkz.import = None;
+    }
+}
+
+fn outcome(ui: &mut Ui, palette: &theme::Palette, result: &Result<String, String>) {
+    let (icon, color, text) = match result {
+        Ok(text) => (Icon::CircleCheck, palette.accent, text.as_str()),
+        Err(error) => (Icon::CircleAlert, palette.danger, error.as_str()),
+    };
+    ui.horizontal(|ui| {
+        theme::icon(ui, icon, 18.0, color);
+        wrapped(ui, text, theme::medium(13.5), palette.text);
+    });
+}
+
+fn wrapped(ui: &mut Ui, text: &str, font: egui::FontId, color: egui::Color32) {
+    ui.add(egui::Label::new(egui::RichText::new(text).font(font).color(color)).wrap());
+}
+
+fn truncated(ui: &mut Ui, text: &str, font: egui::FontId, color: egui::Color32) -> egui::Response {
+    ui.add(egui::Label::new(egui::RichText::new(text).font(font).color(color)).truncate())
+}
+
+/// The songs of a list: number or state, cover, title and artist. While
+/// `editable`, each row has a tick to pick it and a pencil to change its
+/// names.
+fn song_rows(
+    ui: &mut Ui,
+    palette: &theme::Palette,
+    locale: crate::i18n::Locale,
+    art: &crate::images::ArtLoader,
+    rows: &mut [Row],
+    editable: bool,
+) {
+    egui::ScrollArea::vertical()
+        .id_salt("twerkz-import-rows")
+        .max_height(320.0)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            for (index, row) in rows.iter_mut().enumerate() {
+                ui.push_id(index, |ui| {
+                    Frame::new()
+                        .fill(if row.editing { palette.surface } else { egui::Color32::TRANSPARENT })
+                        .corner_radius(CornerRadius::same(6))
+                        .inner_margin(Margin::symmetric(8, 5))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.horizontal(|ui| {
+                                let (marker, _) = ui.allocate_exact_size(vec2(22.0, 40.0), egui::Sense::hover());
+                                match &row.state {
+                                    RowState::Waiting => {
+                                        ui.painter().text(
+                                            marker.center(),
+                                            Align2::CENTER_CENTER,
+                                            (index + 1).to_string(),
+                                            theme::medium(12.0),
+                                            palette.dim,
+                                        );
+                                    }
+                                    RowState::Working => {
+                                        egui::Spinner::new()
+                                            .size(14.0)
+                                            .color(palette.accent)
+                                            .paint_at(ui, egui::Rect::from_center_size(marker.center(), vec2(14.0, 14.0)));
+                                    }
+                                    RowState::Added => {
+                                        theme::paint_icon(ui, Icon::Check, marker, 16.0, palette.accent);
+                                    }
+                                    RowState::Failed(_) => {
+                                        theme::paint_icon(ui, Icon::CircleAlert, marker, 16.0, palette.danger);
+                                    }
+                                }
+                                let (rect, _) = ui.allocate_exact_size(vec2(40.0, 40.0), egui::Sense::hover());
+                                crate::ui::widgets::paint_cover(
+                                    ui,
+                                    palette,
+                                    row.preview.thumbnail.as_deref(),
+                                    rect,
+                                    4.0,
+                                    Icon::Music,
+                                    Some(art),
+                                );
+                                if !row.picked {
+                                    ui.painter().rect_filled(rect, CornerRadius::same(4), palette.overlay.gamma_multiply(0.6));
+                                }
+                                ui.add_space(4.0);
+                                let controls = if editable { 64.0 } else { 0.0 };
+                                ui.allocate_ui_with_layout(
+                                    vec2(ui.available_width() - controls, 40.0),
+                                    egui::Layout::top_down(egui::Align::Min),
+                                    |ui| {
+                                        if row.editing {
+                                            small_field(ui, palette, locale, &mut row.title, "Title");
+                                            ui.add_space(3.0);
+                                            small_field(ui, palette, locale, &mut row.artist, "Artist");
+                                        } else {
+                                            let faded = matches!(row.state, RowState::Added) || !row.picked;
+                                            ui.add_space(3.0);
+                                            truncated(
+                                                ui,
+                                                &row.title,
+                                                theme::medium(13.5),
+                                                if faded { palette.secondary } else { palette.text },
+                                            );
+                                            let detail = match &row.state {
+                                                RowState::Failed(error) => error.clone(),
+                                                _ => row.artist.clone(),
+                                            };
+                                            let color = match row.state {
+                                                RowState::Failed(_) => palette.danger,
+                                                _ if faded => palette.dim,
+                                                _ => palette.secondary,
+                                            };
+                                            truncated(ui, &detail, theme::regular(12.0), color);
+                                        }
+                                    },
+                                );
+                                if editable {
+                                    let tip = if row.editing { "Done editing" } else { "Edit title and artist" };
+                                    let pencil = if row.editing { Icon::Check } else { Icon::Pencil };
+                                    if theme::icon_button(ui, pencil, 16.0, palette.secondary, palette.text, tip).clicked() {
+                                        row.editing = !row.editing;
+                                    }
+                                    if tick(ui, palette, row.picked).clicked() {
+                                        row.picked = !row.picked;
+                                    }
+                                }
+                            });
+                        });
+                });
+            }
+        });
+}
+
+/// A round tick: filled green when picked, an empty ring when not.
+fn tick(ui: &mut Ui, palette: &theme::Palette, on: bool) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(24.0, 24.0), egui::Sense::click());
+    let response = response.on_hover_text(if on { "Skip this song" } else { "Download this song" });
+    let center = rect.center();
+    if on {
+        ui.painter().circle_filled(center, 10.0, palette.accent);
+        theme::paint_icon(ui, Icon::Check, rect, 13.0, palette.on_accent);
+    } else {
+        let color = if response.hovered() { palette.text } else { palette.dim };
+        ui.painter().circle_stroke(center, 9.5, Stroke::new(1.5, color));
+    }
+    response
+}
+
+fn small_field(ui: &mut Ui, palette: &theme::Palette, locale: crate::i18n::Locale, text: &mut String, hint: &str) {
+    Frame::new()
+        .fill(palette.overlay)
+        .stroke(Stroke::new(1.0, palette.outline))
+        .corner_radius(CornerRadius::same(4))
+        .inner_margin(Margin::symmetric(6, 2))
+        .show(ui, |ui| {
+            let _ = crate::ui::widgets::text_edit(
+                ui,
+                locale,
+                egui::TextEdit::singleline(text)
+                    .hint_text(egui::RichText::new(hint).color(palette.dim))
+                    .font(theme::regular(12.5))
+                    .frame(egui::Frame::NONE)
+                    .desired_width(f32::INFINITY),
+            );
+        });
+}
+
+/// The songs in the local folders, filterable, each picked with a click.
+/// Songs already in the playlist are shown but cannot be picked again.
+fn local_list(
+    ui: &mut Ui,
+    palette: &theme::Palette,
+    locale: crate::i18n::Locale,
+    index: Option<&crate::localfiles::Index>,
+    in_playlist: &std::collections::HashSet<String>,
+    filter: &mut String,
+    picked: &mut std::collections::BTreeSet<String>,
+) {
+    let files = index.map(|index| index.files.as_slice()).unwrap_or_default();
+    if files.is_empty() {
+        let text = if index.is_none() {
+            "Looking for local songs…"
+        } else {
+            "No local songs yet. Import some from YouTube or SoundCloud, or add folders under Settings, Local files."
+        };
+        wrapped(ui, text, theme::medium(13.0), palette.secondary);
+        return;
+    }
+    field(ui, palette, locale, "twerkz-local-filter", filter, "Search local songs", true);
+    ui.add_space(8.0);
+    let needle = filter.trim().to_lowercase();
+    let mut shown: Vec<&crate::localfiles::LocalFile> = files
+        .iter()
+        .filter(|file| {
+            needle.is_empty()
+                || [&file.title, &file.artist, &file.album]
+                    .iter()
+                    .any(|text| text.to_lowercase().contains(&needle))
+        })
+        .collect();
+    shown.sort_by_key(|file| file.title.to_lowercase());
+    egui::ScrollArea::vertical()
+        .id_salt("twerkz-local-songs")
+        .max_height(320.0)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            for file in shown {
+                let added = in_playlist.contains(&file.uri);
+                let selected = picked.contains(&file.uri);
+                let subtitle = if file.artist.is_empty() {
+                    file.album.clone()
+                } else {
+                    file.artist.clone()
+                };
+                ui.push_id(&file.uri, |ui| {
+                    ui.add_enabled_ui(!added, |ui| {
+                        let response = Frame::new()
+                            .fill(if selected { palette.surface_active } else { egui::Color32::TRANSPARENT })
+                            .corner_radius(CornerRadius::same(6))
+                            .inner_margin(Margin::symmetric(8, 5))
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.horizontal(|ui| {
+                                    let (rect, _) = ui.allocate_exact_size(vec2(40.0, 40.0), egui::Sense::hover());
+                                    crate::ui::widgets::paint_cover(
+                                        ui,
+                                        palette,
+                                        Some(file.uri.as_str()),
+                                        rect,
+                                        4.0,
+                                        Icon::Music,
+                                        None,
+                                    );
+                                    ui.add_space(4.0);
+                                    ui.vertical(|ui| {
+                                        ui.add_space(3.0);
+                                        truncated(ui, &file.title, theme::medium(13.5), palette.text);
+                                        let detail = if added {
+                                            format!("{subtitle} · already in this playlist")
+                                        } else {
+                                            subtitle.clone()
+                                        };
+                                        truncated(ui, &detail, theme::regular(12.0), palette.secondary);
+                                    });
+                                    if selected || added {
+                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            theme::icon(ui, Icon::CircleCheck, 18.0, palette.accent);
+                                        });
+                                    }
+                                });
+                            })
+                            .response
+                            .interact(egui::Sense::click());
+                        if response.clicked() {
+                            if selected {
+                                picked.remove(&file.uri);
+                            } else {
+                                picked.insert(file.uri.clone());
+                            }
+                        }
+                    });
+                });
+            }
+        });
+}
+
+fn field(
+    ui: &mut Ui,
+    palette: &theme::Palette,
+    locale: crate::i18n::Locale,
+    id: &str,
+    text: &mut String,
+    hint: &str,
+    focus: bool,
+) -> egui::Response {
+    let response = Frame::new()
+        .fill(palette.surface)
+        .corner_radius(CornerRadius::same(6))
+        .inner_margin(Margin::symmetric(12, 8))
+        .show(ui, |ui| {
+            crate::ui::widgets::text_edit(
+                ui,
+                locale,
+                egui::TextEdit::singleline(text)
+                    .id(egui::Id::new(id))
+                    .hint_text(egui::RichText::new(hint).color(palette.dim))
+                    .font(theme::regular(14.0))
+                    .frame(egui::Frame::NONE)
+                    .desired_width(f32::INFINITY),
+            )
+        })
+        .inner;
+    if focus && ui.memory(|memory| memory.focused().is_none()) {
+        response.request_focus();
+    }
+    response
 }
 
 pub fn on_event(app: &mut App, event: Event) {
@@ -160,6 +1112,13 @@ pub fn on_event(app: &mut App, event: Event) {
         | Event::Progress { id, .. }
         | Event::Finished { id, .. }
         | Event::Failed { id, .. } => *id,
+        Event::ImportPreview { .. }
+        | Event::ImportStatus { .. }
+        | Event::Imported { .. }
+        | Event::AddedLocal { .. } => {
+            on_import_event(app, event);
+            return;
+        }
         Event::Romanized { uri, result } => {
             on_romanized(app, uri.clone(), result.clone());
             return;
@@ -238,6 +1197,7 @@ pub fn on_event(app: &mut App, event: Event) {
 /// The job cards, bottom left above the player bar: the song being worked
 /// on with its cover, how far along the job is, and a way to stop it.
 pub fn panel(app: &mut App, ctx: &egui::Context) {
+    import_dialog(app, ctx);
     app.twerkz.jobs.retain(|job| {
         job.ended
             .is_none_or(|ended| job.error || ended.elapsed().as_secs() < 15)

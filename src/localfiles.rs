@@ -459,6 +459,14 @@ fn index_file_entry(
     }))
 }
 
+/// The `spotify:local:` URI the playback engine will key `path` under.
+pub fn uri_of(path: &Path) -> Result<String, String> {
+    let (artist, album, title, _, seconds) = read_tags(path).map_err(|error| match error {
+        EntryError::Unreadable(error) | EntryError::Content(error) => error,
+    })?;
+    Ok(local_uri(&artist, &album, &title, seconds))
+}
+
 fn read_tags(path: &Path) -> Result<(String, String, String, u32, u64), EntryError> {
     let file = std::fs::File::open(path)
         .map_err(|error| EntryError::Unreadable(format!("failed to open file: {error}")))?;

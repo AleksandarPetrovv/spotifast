@@ -312,6 +312,9 @@ pub fn actions_row(
         {
             app.actions.push(Action::SaveRadio(seed.clone()));
         }
+        if let Some(playlist) = &actions.owned_playlist {
+            crate::twerkz::ui::import_button(ui, app, playlist);
+        }
         if let Some(uri) = &actions.play_uri {
             let more = theme::icon_button(
                 ui,
