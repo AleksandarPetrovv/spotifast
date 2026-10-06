@@ -252,6 +252,80 @@ async fn resolve(backend: &Backend, uri: &str) -> Result<(Vec<Song>, Option<Stri
             }
             _ => bail!("unexpected answer"),
         },
+        "album" => {
+            let album: Album = match ask(backend, ApiRequest::Album { id: id.clone() }).await {
+                ApiResponse::Album { result, .. } => result.map_err(|error| anyhow!("{error}"))?,
+                _ => bail!("unexpected answer"),
+            };
+            let mut songs = Vec::new();
+            let mut offset = 0;
+            loop {
+                let page = match ask(
+                    backend,
+                    ApiRequest::AlbumTracks {
+                        id: id.clone(),
+                        offset,
+                        generation: 0,
+                    },
+                )
+                .await
+                {
+                    ApiResponse::AlbumTracks { result, .. } => result.map_err(|error| anyhow!("{error}"))?,
+                    _ => bail!("unexpected answer"),
+                };
+                let count = page.items.len() as u32;
+                songs.extend(page.items.iter().filter_map(|track| Song::from_track(track, Some(&album))));
+                offset += count;
+                if count == 0 || offset >= page.total {
+                    break;
+                }
+            }
+            Ok((songs, Some(album.name)))
+        }
+        "playlist" => {
+            let name = match ask(
+                backend,
+                ApiRequest::Playlist {
+                    id: id.clone(),
+                    generation: 0,
+                },
+            )
+            .await
+            {
+                ApiResponse::Playlist { result, .. } => result.map(|playlist| playlist.name).unwrap_or_default(),
+                _ => String::new(),
+            };
+            let mut songs = Vec::new();
+            let mut offset = 0;
+            loop {
+                let page = match ask(
+                    backend,
+                    ApiRequest::PlaylistItems {
+                        id: id.clone(),
+                        offset,
+                        generation: 0,
+                    },
+                )
+                .await
+                {
+                    ApiResponse::PlaylistItems { result, .. } => result.map_err(|error| anyhow!("{error}"))?,
+                    _ => bail!("unexpected answer"),
+                };
+                let count = page.items.len() as u32;
+                for row in &page.items {
+                    if let Some(crate::api::models::PlayableItem::Track(track)) = row.playable()
+                        && let Some(song) = Song::from_track(track, None)
+                    {
+                        songs.push(song);
+                    }
+                }
+                offset += count;
+                if count == 0 || offset >= page.total {
+                    break;
+                }
+            }
+            Ok((songs, Some(name)))
+        }
         _ => bail!("only songs, albums and playlists can be downloaded"),
     }
 }
