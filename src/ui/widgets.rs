@@ -808,6 +808,7 @@ pub fn item_menu(
     ui.set_max_width(300.0);
     let uri = item.uri().to_string();
     let label = item.name().to_string();
+    crate::twerkz::ui::download_menu(ui, app, &uri, &label);
     if menu_item(
         ui,
         &palette,
@@ -994,6 +995,7 @@ pub fn context_menu_items(
     ui.set_min_width(200.0);
     ui.set_max_width(300.0);
     let kind = util::uri_kind(uri).unwrap_or("");
+    crate::twerkz::ui::download_menu(ui, app, uri, name);
     if menu_item(ui, &palette, Some(Icon::Play), &gettext(locale, "Play")) {
         app.actions.push(Action::PlayContext {
             uri: uri.to_string(),

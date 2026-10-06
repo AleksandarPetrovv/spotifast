@@ -435,6 +435,7 @@ pub struct App {
     pub lyrics_line_shown: Option<Option<usize>>,
     pub show_devices: bool,
     pub toasts: Vec<Toast>,
+    pub twerkz: crate::twerkz::ui::State,
     pub actions: Vec<Action>,
     volume_before_mute: Option<u8>,
     /// Context and track URIs whose pending play buttons show a spinner.
@@ -879,6 +880,7 @@ impl App {
             lyrics_line_shown: None,
             show_devices: false,
             toasts: Vec::new(),
+            twerkz: Default::default(),
             actions: Vec::new(),
             volume_before_mute: None,
             pending_play_keys: Vec::new(),
@@ -1932,6 +1934,7 @@ impl App {
                     result,
                 } => self.handle_proxy_applied(request, config, result),
                 Event::Error(message) => self.toast_error(message),
+                Event::Twerkz(event) => crate::twerkz::ui::on_event(self, event),
                 Event::Rootlist { result } => match result {
                     Ok(rootlist) => {
                         let account_id = self.user_id().map(str::to_owned).or_else(|| {
@@ -8357,6 +8360,7 @@ impl App {
         }
         match action {
             Action::Open(page) => self.open(page),
+            Action::Twerkz(action) => crate::twerkz::ui::apply(self, action),
             Action::PrepareTint(url) => {
                 if self.settings.accent_from_art {
                     self.tint_for(Some(&url));

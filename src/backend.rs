@@ -563,6 +563,7 @@ struct PlaylistCacheWrite {
 }
 
 pub enum Command {
+    Twerkz(crate::twerkz::Request),
     OpenThemesFolder,
     ProxyRestored {
         lease: CredentialLease,
@@ -755,6 +756,7 @@ pub struct LyricsRequest {
 }
 
 pub enum Event {
+    Twerkz(crate::twerkz::Event),
     ProxyRestored {
         config: ProxyConfig,
         password: Option<crate::credentials::ProxyPassword>,
@@ -1958,6 +1960,23 @@ impl Worker {
                     });
                 }
                 Command::Lyrics(request) => self.fetch_lyrics(*request),
+                Command::Twerkz(request) => {
+                    let events = self.events.clone();
+                    let waker = self.waker.clone();
+                    crate::twerkz::jobs::start(
+                        request,
+                        crate::twerkz::jobs::Backend {
+                            api: self.api.clone(),
+                            engine: self.engine.clone(),
+                            http: self.http.client(),
+                            dirs: self.dirs.clone(),
+                            emit: Arc::new(move |event| {
+                                let _ = events.send(Event::Twerkz(event));
+                                waker.wake();
+                            }),
+                        },
+                    );
+                }
                 Command::Rootlist => self.fetch_rootlist(),
                 Command::RootlistFinished { generation, result } => {
                     self.on_rootlist_finished(generation, result);
@@ -3669,7 +3688,7 @@ fn observe_playlists(api: &ApiGateway, response: &ApiResponse) {
     }
 }
 
-async fn handle(
+pub(crate) async fn handle(
     api: &ApiGateway,
     engine: Option<&Engine>,
     request: ApiRequest,

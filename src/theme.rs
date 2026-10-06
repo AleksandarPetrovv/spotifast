@@ -475,6 +475,9 @@ fastframe_icons::icons! {
         Watch => "watch",
         X => lucide "x",
         Zap => "zap",
+        Download => "download",
+        FolderOpen => "folder-open",
+        MusicPlus => "music-plus",
     }
 }
 

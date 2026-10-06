@@ -919,6 +919,7 @@ pub struct Toast {
 /// Actions emitted while drawing and applied afterward to avoid borrow conflicts.
 #[derive(Clone, Debug)]
 pub enum Action {
+    Twerkz(crate::twerkz::ui::Action),
     Open(Page),
     /// Extracts a page's tint while its library row is hovered.
     PrepareTint(String),

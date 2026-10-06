@@ -2,9 +2,83 @@
 //! YouTube and SoundCloud imports, and a user emoji font. Kept in one
 //! folder so upstream merges stay small.
 
+pub mod download;
+pub mod jobs;
 pub mod lyrics;
 pub mod romanize;
 pub mod tools;
+pub mod ui;
+
+use std::future::Future;
+use std::path::PathBuf;
+use std::pin::Pin;
+
+pub use download::Format;
+
+/// A folder picker, built on the UI thread and awaited on the runtime.
+pub type FolderPick = Pin<Box<dyn Future<Output = Option<rfd::FileHandle>> + Send>>;
+pub type FilePick = FolderPick;
+
+/// What the app asks the backend for.
+pub enum Request {
+    Download {
+        id: u64,
+        uri: String,
+        name: String,
+        format: Format,
+        folder: FolderPick,
+    },
+    Cancel {
+        id: u64,
+    },
+    Romanize {
+        uri: String,
+        lines: Vec<crate::lyrics::Line>,
+    },
+}
+
+impl std::fmt::Debug for Request {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Request::Download { id, uri, format, .. } => {
+                write!(f, "Download {{ id: {id}, uri: {uri}, format: {format:?} }}")
+            }
+            Request::Cancel { id } => write!(f, "Cancel {{ id: {id} }}"),
+            Request::Romanize { uri, .. } => write!(f, "Romanize {{ uri: {uri} }}"),
+        }
+    }
+}
+
+/// What the backend tells the app about a job.
+#[derive(Clone, Debug)]
+pub enum Event {
+    /// The folder picker was closed without a choice.
+    Dismissed { id: u64 },
+    Status { id: u64, text: String },
+    /// `title` is the song now downloading, empty when unchanged.
+    Progress {
+        id: u64,
+        done: usize,
+        failed: usize,
+        total: usize,
+        title: String,
+        artist: String,
+        cover: Option<String>,
+    },
+    Finished {
+        id: u64,
+        saved: usize,
+        skipped: usize,
+        failed: Vec<String>,
+        folder: PathBuf,
+    },
+    Failed { id: u64, message: String },
+    /// The lyrics of `uri` in Latin letters, one per line.
+    Romanized {
+        uri: String,
+        result: Result<Vec<String>, String>,
+    },
+}
 
 /// Lowercased words without punctuation.
 fn normalize(text: &str) -> Vec<char> {
