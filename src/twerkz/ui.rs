@@ -55,6 +55,8 @@ pub struct State {
     next_id: u64,
     last_folder: Option<PathBuf>,
     import: Option<Import>,
+    /// The emoji font the next start will use, read once Settings shows it.
+    emoji_next: Option<Option<String>>,
     romaji: Option<Romaji>,
     romaji_on: bool,
     scanned: bool,
@@ -1120,6 +1122,10 @@ pub fn on_event(app: &mut App, event: Event) {
             on_import_event(app, event);
             return;
         }
+        Event::EmojiFont { result } => {
+            on_emoji_event(app, result.clone());
+            return;
+        }
         Event::Romanized { uri, result } => {
             on_romanized(app, uri.clone(), result.clone());
             return;
@@ -1192,6 +1198,12 @@ pub fn on_event(app: &mut App, event: Event) {
                 job.end(true, message);
             }
         }
+        Event::ImportPreview { .. }
+        | Event::ImportStatus { .. }
+        | Event::Imported { .. }
+        | Event::AddedLocal { .. }
+        | Event::EmojiFont { .. }
+        | Event::Romanized { .. } => {}
     }
 }
 
@@ -1375,6 +1387,80 @@ fn small_button(ui: &mut Ui, palette: &theme::Palette, label: &str) -> bool {
         .corner_radius(CornerRadius::same(6)),
     )
     .clicked()
+}
+
+/// The emoji font row in Settings. Returns whether it is shown under the
+/// search in the settings filter.
+pub fn emoji_settings(app: &mut App, ui: &mut Ui, needle: &str) -> bool {
+    const TITLE: &str = "Emoji font";
+    const DESCRIPTION: &str =
+        "Draw emoji with a font file of your own, such as Apple Color Emoji. Applies after a restart.";
+    let needle = needle.trim().to_lowercase();
+    if !needle.is_empty()
+        && !["emoji", TITLE, DESCRIPTION]
+            .iter()
+            .any(|text| text.to_lowercase().contains(&needle))
+    {
+        return false;
+    }
+    let palette = app.palette;
+    let next = app
+        .twerkz
+        .emoji_next
+        .get_or_insert_with(super::emoji::next_name)
+        .clone();
+    crate::ui::settings::section(ui, &palette, "Emoji", |ui| {
+        crate::ui::widgets::setting_row(ui, &palette, TITLE, DESCRIPTION, |ui| {
+            ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
+                theme::text(
+                    ui,
+                    next.as_deref().unwrap_or("System emoji"),
+                    theme::medium(13.0),
+                    palette.secondary,
+                );
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if theme::soft_button(ui, &palette, Some(Icon::FolderOpen), "Open folder", false)
+                        .clicked()
+                    {
+                        app.actions
+                            .push(crate::model::Action::Twerkz(Action::OpenFolder(super::emoji::folder())));
+                    }
+                    if next.is_some()
+                        && theme::soft_button(ui, &palette, None, "Use system emoji", false).clicked()
+                    {
+                        match super::emoji::choose_system() {
+                            Ok(()) => {
+                                app.twerkz.emoji_next = Some(None);
+                                app.toast("System emoji from the next start");
+                            }
+                            Err(error) => app.toast_error(format!("Couldn't change the emoji font: {error}")),
+                        }
+                    }
+                    if theme::soft_button(ui, &palette, None, "Choose font…", false).clicked() {
+                        let file = rfd::AsyncFileDialog::new()
+                            .set_title("Choose an emoji font")
+                            .add_filter("Font", &["ttf", "ttc"])
+                            .pick_file();
+                        app.backend
+                            .send(Command::Twerkz(Request::ChooseEmojiFont { file: Box::pin(file) }));
+                    }
+                });
+            });
+        });
+    });
+    true
+}
+
+fn on_emoji_event(app: &mut App, result: Result<Option<String>, String>) {
+    match result {
+        Ok(Some(name)) => {
+            app.twerkz.emoji_next = Some(Some(name.clone()));
+            app.toast(format!("{name} from the next start"));
+        }
+        Ok(None) => {}
+        Err(error) => app.toast_error(format!("Couldn't use that font: {error}")),
+    }
 }
 
 /// Romanized lyrics for the song on screen.

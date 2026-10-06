@@ -13,9 +13,12 @@
 /// `synchronous` draws each picture in the frame that first shows it, for
 /// demo captures that must show every emoji in their first frame.
 pub fn install(synchronous: bool) {
-    fastframe_emoji::EmojiSetup::default()
-        .system(true)
-        .synchronous(synchronous)
-        .install();
+    let setup = match crate::twerkz::emoji::user_font() {
+        Some(font) => fastframe_emoji::EmojiSetup::default()
+            .system(false)
+            .bundled(font),
+        None => fastframe_emoji::EmojiSetup::default().system(true),
+    };
+    setup.synchronous(synchronous).install();
     std::thread::spawn(fastframe_emoji::warm_up);
 }

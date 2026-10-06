@@ -216,6 +216,21 @@ pub fn start(request: Request, backend: Backend) {
                 });
             });
         }
+        Request::ChooseEmojiFont { file } => {
+            tokio::spawn(async move {
+                let result = match file.await {
+                    Some(file) => {
+                        let path = file.path().to_path_buf();
+                        tokio::task::spawn_blocking(move || super::emoji::choose(&path))
+                            .await
+                            .map_err(|error| error.to_string())
+                            .and_then(|chosen| chosen.map(Some).map_err(|error| error.to_string()))
+                    }
+                    None => Ok(None),
+                };
+                (backend.emit)(Event::EmojiFont { result });
+            });
+        }
         Request::ImportPreview { id, url } => {
             tokio::spawn(async move {
                 let result = async {

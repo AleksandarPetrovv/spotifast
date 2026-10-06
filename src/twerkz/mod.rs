@@ -4,6 +4,7 @@
 
 pub mod covers;
 pub mod download;
+pub mod emoji;
 pub mod import;
 pub mod jobs;
 pub mod lyrics;
@@ -38,6 +39,9 @@ pub enum Request {
         id: u64,
         url: String,
     },
+    ChooseEmojiFont {
+        file: FilePick,
+    },
     Romanize {
         uri: String,
         lines: Vec<crate::lyrics::Line>,
@@ -64,6 +68,7 @@ impl std::fmt::Debug for Request {
                 write!(f, "Download {{ id: {id}, uri: {uri}, format: {format:?} }}")
             }
             Request::Cancel { id } => write!(f, "Cancel {{ id: {id} }}"),
+            Request::ChooseEmojiFont { .. } => write!(f, "ChooseEmojiFont"),
             Request::Romanize { uri, .. } => write!(f, "Romanize {{ uri: {uri} }}"),
             Request::AddLocal { id, playlist_id, uris } => write!(
                 f,
@@ -109,6 +114,8 @@ pub enum Event {
         result: Result<import::Found, String>,
     },
     ImportStatus { id: u64, text: String },
+    /// A font was chosen for the next start; `Ok(None)` when the picker closed.
+    EmojiFont { result: Result<Option<String>, String> },
     /// The lyrics of `uri` in Latin letters, one per line.
     Romanized {
         uri: String,

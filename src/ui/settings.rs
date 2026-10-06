@@ -168,7 +168,7 @@ pub(crate) fn clear_search(ctx: &egui::Context) {
 }
 const PROXY_DIRTY_ID: &str = "proxy-settings-dirty";
 
-fn section(
+pub(crate) fn section(
     ui: &mut egui::Ui,
     palette: &Palette,
     title: &str,
@@ -1306,6 +1306,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             }
         });
     }
+
+    // twerkz: the emoji font.
+    any_visible |= crate::twerkz::ui::emoji_settings(app, ui, &needle);
 
     let proxy = gettext(locale, "Proxy");
     let proxy_rows = [RowText::new(
