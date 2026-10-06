@@ -3,6 +3,7 @@
 //! folder so upstream merges stay small.
 
 pub mod lyrics;
+pub mod romanize;
 pub mod tools;
 
 /// Lowercased words without punctuation.

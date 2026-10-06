@@ -53,6 +53,7 @@ pub fn side_panel(app: &mut App, ui: &mut egui::Ui) {
                 .inner_margin(Margin::symmetric(12, 12)),
         );
     let response = panel.show(ui, |ui| {
+        let hovered = ui.rect_contains_pointer(ui.max_rect());
         let window_controls = super::window_controls_reservation(
             ui.ctx(),
             app.show_queue_panel,
@@ -93,6 +94,7 @@ pub fn side_panel(app: &mut App, ui: &mut egui::Ui) {
                 {
                     app.actions.push(Action::SetLyricsFullscreen(true));
                 }
+                crate::twerkz::ui::romaji_button(app, ui, hovered);
                 let loaded = matches!(&app.lyrics, Loadable::Loaded(Some(_)));
                 if loaded
                     && !app.lyrics_following
@@ -178,6 +180,7 @@ fn contents(app: &mut App, ui: &mut egui::Ui) {
     };
 
     let active = lyrics.active_line(now.position_ms);
+    let romaji = crate::twerkz::ui::romaji_for(app, &now.uri, &lyrics);
     let follow = app.lyrics_following && app.lyrics_line_shown != Some(active);
     // The line being sung is bold and in the accent colour; every other
     // line is quiet, regular text, the same before and after it has been
@@ -219,6 +222,7 @@ fn contents(app: &mut App, ui: &mut egui::Ui) {
                 } else {
                     line.text.as_str()
                 };
+                let text = crate::twerkz::ui::romaji_text(romaji.as_ref(), index, text);
                 let sense = if lyrics.synced {
                     Sense::click()
                 } else {
@@ -537,6 +541,12 @@ fn fullscreen_header(app: &mut App, ui: &mut egui::Ui) {
             {
                 app.actions.push(Action::SetLyricsFullscreen(false));
             }
+            // twerkz: the romaji toggle shows while the mouse moves.
+            let moving = ui.input(|input| input.pointer.time_since_last_movement() < 3.0);
+            if moving {
+                ui.ctx().request_repaint_after(std::time::Duration::from_secs(3));
+            }
+            crate::twerkz::ui::romaji_button(app, ui, moving);
             let loaded = matches!(&app.lyrics, Loadable::Loaded(Some(_)));
             if loaded
                 && !app.lyrics_following
@@ -647,6 +657,7 @@ fn fullscreen_contents(app: &mut App, ui: &mut egui::Ui) {
     };
 
     let active = lyrics.active_line(now.position_ms);
+    let romaji = crate::twerkz::ui::romaji_for(app, &now.uri, &lyrics);
     // A Follow click resets the remembered line after drawing. Other frames
     // record the shown line before any line-click action restores following.
     if !app
@@ -715,6 +726,7 @@ fn fullscreen_contents(app: &mut App, ui: &mut egui::Ui) {
                 } else {
                     line.text.as_str()
                 };
+                let text = crate::twerkz::ui::romaji_text(romaji.as_ref(), index, text);
                 let sense = if lyrics.synced {
                     Sense::click()
                 } else {
