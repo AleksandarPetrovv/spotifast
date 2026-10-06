@@ -2,6 +2,7 @@
 //! YouTube and SoundCloud imports, and a user emoji font. Kept in one
 //! folder so upstream merges stay small.
 
+pub mod covers;
 pub mod download;
 pub mod import;
 pub mod jobs;

@@ -57,6 +57,7 @@ pub struct State {
     import: Option<Import>,
     romaji: Option<Romaji>,
     romaji_on: bool,
+    scanned: bool,
     reloaded: Option<Instant>,
 }
 
@@ -1194,9 +1195,24 @@ pub fn on_event(app: &mut App, event: Event) {
     }
 }
 
+/// Keeps the local covers in step with the index, and reads the local files
+/// once at startup so playlists show and play them straight away.
+fn local_files(app: &mut App) {
+    super::covers::set_index(app.local_index.clone());
+    if app.twerkz.scanned {
+        return;
+    }
+    app.twerkz.scanned = true;
+    if app.local_index.is_none() && !app.local_files_scanning && !app.settings.local_folders.is_empty() {
+        app.local_files_scanning = true;
+        app.backend.send(Command::LocalFilesScan);
+    }
+}
+
 /// The job cards, bottom left above the player bar: the song being worked
 /// on with its cover, how far along the job is, and a way to stop it.
 pub fn panel(app: &mut App, ctx: &egui::Context) {
+    local_files(app);
     import_dialog(app, ctx);
     app.twerkz.jobs.retain(|job| {
         job.ended

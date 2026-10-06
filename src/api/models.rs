@@ -312,6 +312,8 @@ impl Track {
         self.album
             .as_ref()
             .and_then(|album| pick_image(&album.images, target))
+            // twerkz: a local file's own cover, answered by its URI.
+            .or_else(|| self.uri.starts_with("spotify:local:").then_some(self.uri.as_str()))
     }
 
     /// Stable identity shared by market-specific releases of one recording.

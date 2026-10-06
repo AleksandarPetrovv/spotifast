@@ -3693,6 +3693,24 @@ pub(crate) async fn handle(
     engine: Option<&Engine>,
     request: ApiRequest,
 ) -> (ApiResponse, Option<ApiSource>) {
+    // twerkz: the Web API cannot remove local songs; the session can.
+    if let ApiRequest::RemoveFromPlaylist { playlist_id, uris, .. } = &request
+        && uris.iter().any(|uri| uri.starts_with("spotify:local:"))
+        && let Some(engine) = engine
+    {
+        let result = crate::twerkz::playlist::remove(engine.session(), playlist_id, uris)
+            .await
+            .map(|()| None)
+            .map_err(|error| ApiError::Network(format!("{error:#}")));
+        return (
+            ApiResponse::PlaylistItemsChanged {
+                id: playlist_id.clone(),
+                message: "Removed from playlist".to_string(),
+                result,
+            },
+            None,
+        );
+    }
     let operation = operation_for(api, &request);
     // A session whose long-lived connection has dropped still answers over
     // its HTTP client, so the engine's presence is the only liveness test;

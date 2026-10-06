@@ -986,6 +986,7 @@ impl App {
     pub fn attach(&mut self, ctx: &egui::Context) {
         theme::install(ctx);
         ctx.add_bytes_loader(std::sync::Arc::new(self.backend.art().clone()));
+        ctx.add_bytes_loader(std::sync::Arc::new(crate::twerkz::covers::LocalCovers));
         ctx.set_theme(self.theme_preference());
         self.applied_dark = None;
         self.winamp.forget_textures();

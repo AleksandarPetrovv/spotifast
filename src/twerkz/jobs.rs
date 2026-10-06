@@ -51,11 +51,13 @@ pub fn ensure_local_songs_folder(dirs: &AppDirs, settings: &mut crate::settings:
     if std::fs::create_dir_all(&folder).is_err() {
         return;
     }
+    super::import::upgrade_tags(&folder);
     let offered_file = root(dirs).join("offered-folders.txt");
     let offered = std::fs::read_to_string(&offered_file).unwrap_or_default();
     let mut offered: Vec<String> = offered.lines().map(str::to_string).collect();
     let mut changed = false;
     let mut wanted = vec![folder.to_string_lossy().into_owned()];
+    wanted.extend(spotify_folders());
     for path in wanted {
         if offered.contains(&path) {
             continue;
@@ -73,6 +75,60 @@ pub fn ensure_local_songs_folder(dirs: &AppDirs, settings: &mut crate::settings:
     }
 }
 
+/// The folders holding the local files Spotify's desktop app knows of.
+fn spotify_folders() -> Vec<String> {
+    let Some(base) = directories::BaseDirs::new() else {
+        return Vec::new();
+    };
+    let users = if cfg!(windows) {
+        base.config_dir().join("Spotify").join("Users")
+    } else if cfg!(target_os = "macos") {
+        base.data_dir().join("Spotify").join("Users")
+    } else {
+        base.config_dir().join("spotify").join("Users")
+    };
+    let mut folders: Vec<String> = Vec::new();
+    for user in std::fs::read_dir(users).into_iter().flatten().flatten() {
+        let Ok(bank) = std::fs::read(user.path().join("local-files.bnk")) else {
+            continue;
+        };
+        for path in bank_paths(&bank) {
+            if let Some(parent) = std::path::Path::new(&path).parent()
+                && parent.is_dir()
+            {
+                let parent = parent.to_string_lossy().into_owned();
+                if !folders.contains(&parent) {
+                    folders.push(parent);
+                }
+            }
+        }
+    }
+    folders
+}
+
+/// The file paths written in a Spotify local files bank.
+fn bank_paths(bank: &[u8]) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut at = 0;
+    while at + 3 < bank.len() {
+        let windows = bank[at].is_ascii_alphabetic() && bank[at + 1] == b':' && bank[at + 2] == b'\\';
+        let unix = bank[at] == b'/' && at > 0 && bank[at - 1] < 0x20 && bank[at + 1].is_ascii_alphanumeric();
+        if !windows && !unix {
+            at += 1;
+            continue;
+        }
+        let end = bank[at..]
+            .iter()
+            .position(|byte| *byte < 0x20)
+            .map_or(bank.len(), |offset| at + offset);
+        let path = String::from_utf8_lossy(&bank[at..end]).into_owned();
+        if std::path::Path::new(&path).extension().is_some() {
+            paths.push(path);
+        }
+        at = end;
+    }
+    paths
+}
 
 pub fn tools_dir(dirs: &AppDirs) -> PathBuf {
     root(dirs).join("tools")

@@ -448,6 +448,32 @@ fn tag(path: &Path, title: &str, artist: &str, album: &str, link: &str, cover: O
     Ok(())
 }
 
+/// Songs imported with ID3v2.4 tags, rewritten as ID3v2.3 so Spotify shows
+/// their covers too.
+pub fn upgrade_tags(folder: &Path) {
+    for entry in std::fs::read_dir(folder).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if !path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("mp3")) {
+            continue;
+        }
+        let mut header = [0u8; 4];
+        let v24 = std::fs::File::open(&path)
+            .and_then(|mut file| std::io::Read::read_exact(&mut file, &mut header))
+            .is_ok_and(|()| header == *b"ID3\x04");
+        if !v24 {
+            continue;
+        }
+        let rewritten = lofty::read_from_path(&path).and_then(|tagged| {
+            tagged.primary_tag().map_or(Ok(()), |tag| {
+                tag.save_to_path(&path, WriteOptions::default().use_id3v23(true))
+            })
+        });
+        if let Err(error) = rewritten {
+            log::warn!("could not rewrite the tags of {}: {error}", path.display());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -7,7 +7,7 @@ use http::Method;
 use librespot_core::Session;
 use librespot_core::spotify_id::SpotifyId;
 use librespot_protocol::playlist4_external::{
-    Add, ChangeInfo, Delta, Item, ItemAttributes, ListChanges, Op, SelectedListContent, op,
+    Add, ChangeInfo, Delta, Item, ItemAttributes, ListChanges, Op, Rem, SelectedListContent, op,
 };
 use protobuf::Message as _;
 
@@ -28,6 +28,21 @@ pub async fn append(session: &Session, playlist_id: &str, uris: &[String]) -> Re
     let mut operation = Op::new();
     operation.set_kind(op::Kind::ADD);
     operation.add = Some(add).into();
+    change(session, playlist_id, operation).await
+}
+
+/// Removes every row holding one of `uris`.
+pub async fn remove(session: &Session, playlist_id: &str, uris: &[String]) -> Result<()> {
+    let mut rem = Rem::new();
+    rem.set_items_as_key(true);
+    for uri in uris {
+        let mut item = Item::new();
+        item.set_uri(uri.clone());
+        rem.items.push(item);
+    }
+    let mut operation = Op::new();
+    operation.set_kind(op::Kind::REM);
+    operation.rem = Some(rem).into();
     change(session, playlist_id, operation).await
 }
 
