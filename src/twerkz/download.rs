@@ -453,8 +453,7 @@ fn tag(path: &Path, song: &Song, cover: Option<Vec<u8>>, lyrics: Option<String>)
         };
         tag.push_picture(Picture::new_unchecked(PictureType::CoverFront, Some(mime), None, bytes));
     }
-    // Spotify only shows covers from ID3v2.3.
-    tag.save_to_path(path, WriteOptions::default().use_id3v23(true))?;
+    tag.save_to_path(path, WriteOptions::default())?;
     Ok(())
 }
 

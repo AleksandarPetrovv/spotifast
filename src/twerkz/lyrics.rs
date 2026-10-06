@@ -832,7 +832,7 @@ mod live {
             )
         };
         show("musixmatch", &mxm);
-        show("netease", &ne);
+        show("netease", &ne.clone().map(|(found, _)| found));
         show("genius", &ge);
     }
 }

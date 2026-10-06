@@ -843,11 +843,17 @@ fn song_rows(
     rows: &mut [Row],
     editable: bool,
 ) {
+    // A floating bar keeps no gutter, so rows reach the edge.
+    ui.spacing_mut().scroll = egui::style::ScrollStyle::floating();
+    // Measured once: every row is exactly this wide, so their buttons line up.
+    let width = ui.available_width();
     egui::ScrollArea::vertical()
         .id_salt("twerkz-import-rows")
         .max_height(320.0)
         .auto_shrink([false, true])
         .show(ui, |ui| {
+            let left = ui.max_rect().left();
+            let right = left + width - 8.0;
             for (index, row) in rows.iter_mut().enumerate() {
                 ui.push_id(index, |ui| {
                     Frame::new()
@@ -855,7 +861,7 @@ fn song_rows(
                         .corner_radius(CornerRadius::same(6))
                         .inner_margin(Margin::symmetric(8, 5))
                         .show(ui, |ui| {
-                            ui.set_width(ui.available_width());
+                            ui.set_width(width - 16.0);
                             ui.horizontal(|ui| {
                                 let (marker, _) = ui.allocate_exact_size(vec2(22.0, 40.0), egui::Sense::hover());
                                 match &row.state {
@@ -895,9 +901,9 @@ fn song_rows(
                                     ui.painter().rect_filled(rect, CornerRadius::same(4), palette.overlay.gamma_multiply(0.6));
                                 }
                                 ui.add_space(4.0);
-                                let controls = if editable { 64.0 } else { 0.0 };
+                                let controls = if editable { 72.0 } else { 0.0 };
                                 ui.allocate_ui_with_layout(
-                                    vec2(ui.available_width() - controls, 40.0),
+                                    vec2((right - ui.cursor().left() - controls).max(40.0), 40.0),
                                     egui::Layout::top_down(egui::Align::Min),
                                     |ui| {
                                         if row.editing {
@@ -927,13 +933,33 @@ fn song_rows(
                                     },
                                 );
                                 if editable {
+                                    // Placed from the row's right edge, so every row's
+                                    // buttons stand in the same column.
+                                    let middle = marker.center().y;
+                                    let pencil_rect =
+                                        egui::Rect::from_center_size(egui::pos2(right - 43.0, middle), vec2(28.0, 28.0));
+                                    let tick_rect =
+                                        egui::Rect::from_center_size(egui::pos2(right - 11.0, middle), vec2(24.0, 24.0));
                                     let tip = if row.editing { "Done editing" } else { "Edit title and artist" };
                                     let pencil = if row.editing { Icon::Check } else { Icon::Pencil };
-                                    if theme::icon_button(ui, pencil, 16.0, palette.secondary, palette.text, tip).clicked() {
+                                    let edit = ui
+                                        .scope_builder(egui::UiBuilder::new().max_rect(pencil_rect), |ui| {
+                                            theme::icon_button(ui, pencil, 16.0, palette.secondary, palette.text, tip)
+                                        })
+                                        .inner;
+                                    if edit.clicked() {
                                         row.editing = !row.editing;
                                     }
-                                    if tick(ui, palette, row.picked).clicked() {
-                                        row.picked = !row.picked;
+                                    // While the names are edited the pencil's tick is the only one.
+                                    if !row.editing {
+                                        let pick = ui
+                                            .scope_builder(egui::UiBuilder::new().max_rect(tick_rect), |ui| {
+                                                tick(ui, palette, row.picked)
+                                            })
+                                            .inner;
+                                        if pick.clicked() {
+                                            row.picked = !row.picked;
+                                        }
                                     }
                                 }
                             });
@@ -1011,6 +1037,8 @@ fn local_list(
         })
         .collect();
     shown.sort_by_key(|file| file.title.to_lowercase());
+    ui.spacing_mut().scroll = egui::style::ScrollStyle::floating();
+    let width = ui.available_width();
     egui::ScrollArea::vertical()
         .id_salt("twerkz-local-songs")
         .max_height(320.0)
@@ -1031,7 +1059,7 @@ fn local_list(
                             .corner_radius(CornerRadius::same(6))
                             .inner_margin(Margin::symmetric(8, 5))
                             .show(ui, |ui| {
-                                ui.set_width(ui.available_width());
+                                ui.set_width(width - 16.0);
                                 ui.horizontal(|ui| {
                                     let (rect, _) = ui.allocate_exact_size(vec2(40.0, 40.0), egui::Sense::hover());
                                     crate::ui::widgets::paint_cover(
@@ -1056,6 +1084,7 @@ fn local_list(
                                     });
                                     if selected || added {
                                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                            ui.add_space(2.0);
                                             theme::icon(ui, Icon::CircleCheck, 18.0, palette.accent);
                                         });
                                     }

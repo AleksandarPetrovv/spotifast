@@ -356,14 +356,13 @@ pub async fn download(
         Some(url) => fetch_cover(&cx.http, url).await,
         None => None,
     };
-    let (path, tag_title, tag_artist, source, link) = (
+    let (path, tag_title, tag_artist, source) = (
         file.clone(),
         title.to_string(),
         artist.to_string(),
         preview.source.clone(),
-        preview.url.clone(),
     );
-    tokio::task::spawn_blocking(move || tag(&path, &tag_title, &tag_artist, &source, &link, cover))
+    tokio::task::spawn_blocking(move || tag(&path, &tag_title, &tag_artist, &source, cover))
         .await
         .map_err(|error| anyhow!("{error}"))??;
     tokio::fs::create_dir_all(folder).await?;
@@ -423,7 +422,7 @@ fn square(bytes: Vec<u8>) -> Vec<u8> {
     }
 }
 
-fn tag(path: &Path, title: &str, artist: &str, album: &str, link: &str, cover: Option<Vec<u8>>) -> Result<()> {
+fn tag(path: &Path, title: &str, artist: &str, album: &str, cover: Option<Vec<u8>>) -> Result<()> {
     let mut tagged = lofty::read_from_path(path)?;
     let kind = tagged.primary_tag_type();
     // A clean tag, so nothing from the upload disagrees with what Spotify
@@ -434,44 +433,23 @@ fn tag(path: &Path, title: &str, artist: &str, album: &str, link: &str, cover: O
     tag.set_title(title.to_string());
     tag.set_artist(artist.to_string());
     tag.set_album(album.to_string());
-    tag.set_comment(link.to_string());
     if let Some(bytes) = cover {
         let mime = if bytes.starts_with(&[0x89, b'P']) {
             MimeType::Png
         } else {
             MimeType::Jpeg
         };
-        tag.push_picture(Picture::new_unchecked(PictureType::CoverFront, Some(mime), None, bytes));
+        tag.push_picture(Picture::new_unchecked(
+            PictureType::CoverFront,
+            Some(mime),
+            Some("Cover".to_string()),
+            bytes,
+        ));
     }
-    // Spotify only shows covers from ID3v2.3.
+    // Spotify shows covers only from ID3v2.3. Every frame with a description
+    // gets one: lofty writes an empty one as unreadable UTF-16 in v2.3.
     tag.save_to_path(path, WriteOptions::default().use_id3v23(true))?;
     Ok(())
-}
-
-/// Songs imported with ID3v2.4 tags, rewritten as ID3v2.3 so Spotify shows
-/// their covers too.
-pub fn upgrade_tags(folder: &Path) {
-    for entry in std::fs::read_dir(folder).into_iter().flatten().flatten() {
-        let path = entry.path();
-        if !path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("mp3")) {
-            continue;
-        }
-        let mut header = [0u8; 4];
-        let v24 = std::fs::File::open(&path)
-            .and_then(|mut file| std::io::Read::read_exact(&mut file, &mut header))
-            .is_ok_and(|()| header == *b"ID3\x04");
-        if !v24 {
-            continue;
-        }
-        let rewritten = lofty::read_from_path(&path).and_then(|tagged| {
-            tagged.primary_tag().map_or(Ok(()), |tag| {
-                tag.save_to_path(&path, WriteOptions::default().use_id3v23(true))
-            })
-        });
-        if let Err(error) = rewritten {
-            log::warn!("could not rewrite the tags of {}: {error}", path.display());
-        }
-    }
 }
 
 #[cfg(test)]

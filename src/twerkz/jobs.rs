@@ -51,7 +51,6 @@ pub fn ensure_local_songs_folder(dirs: &AppDirs, settings: &mut crate::settings:
     if std::fs::create_dir_all(&folder).is_err() {
         return;
     }
-    super::import::upgrade_tags(&folder);
     let offered_file = root(dirs).join("offered-folders.txt");
     let offered = std::fs::read_to_string(&offered_file).unwrap_or_default();
     let mut offered: Vec<String> = offered.lines().map(str::to_string).collect();
