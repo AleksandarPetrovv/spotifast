@@ -46,6 +46,7 @@ pub mod skin;
 pub mod system_fonts;
 pub mod theme;
 pub mod thumbbar;
+pub mod twerkz;
 pub mod ui;
 pub mod updates;
 pub mod util;

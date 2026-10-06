@@ -149,12 +149,20 @@ http = "1"
 # `fs` is used by the playlist cache in `backend.rs`. On Linux the MPRIS
 # dependency happens to turn it on, which is why leaving it out built
 # there and nowhere else. `net` is the local HTTP-proxy tests.
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "fs", "net", "io-util"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "fs", "net", "io-util", "process"] }
 sha1 = "0.10"
 sha2 = "0.10"
 base64 = "0.22"
 # Native asynchronous file selection on macOS, Windows and Linux desktop portals.
 rfd = "0.17.2"
+# twerkz: tags downloaded songs, unpacks the ffmpeg and deno archives.
+lofty = "0.22"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+# twerkz: lyrics romanization. lindera reads Japanese with the IPADIC
+# dictionary, fetched on first use; pinyin carries its own small table.
+lindera = { version = "6.2", default-features = false, features = ["mmap"] }
+pinyin = { version = "0.11", default-features = false, features = ["plain", "with_tone"] }
+unicode-normalization = "0.1"
 rand = "0.9"
 open = "5"
 percent-encoding = "2"
