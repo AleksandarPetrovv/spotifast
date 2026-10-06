@@ -3277,13 +3277,19 @@ impl Worker {
         tokio::spawn(async move {
             // Spotify's own words go first: they follow the recording
             // exactly. Everything else, a signed-out session included,
-            // falls back to LRCLIB.
+            // falls back to Musixmatch, NetEase, LRCLIB and Genius.
             let result = match spotify_lyrics(engine, &request.uri, &cache_dir).await {
                 Some(found) => Ok(Some(found)),
                 None => match http {
-                    Ok(http) => crate::lyrics::fetch(&http, &cache_dir, &request.query)
+                    Ok(http) => {
+                        crate::twerkz::lyrics::fetch(
+                            &http,
+                            &cache_dir,
+                            &request.uri,
+                            &request.query,
+                        )
                         .await
-                        .map_err(|error| format!("{error:#}")),
+                    }
                     Err(error) => Err(error),
                 },
             };

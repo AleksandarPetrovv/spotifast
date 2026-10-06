@@ -252,17 +252,25 @@ fn score(record: &Record, query: &Query) -> Option<i64> {
         return None;
     }
     let mut score = 0;
-    if loose_match(&record.artist_name, &clean_artist(&query.artist)) {
+    let same_artist = loose_match(&record.artist_name, &clean_artist(&query.artist));
+    if same_artist {
         score += 1000;
     }
+    let mut drift = None;
     if query.duration_ms > 0
         && let Some(duration) = record.duration.filter(|duration| *duration > 0.0)
     {
-        let drift = (duration - f64::from(query.duration_ms) / 1000.0).abs();
-        if drift > MAX_DRIFT_SECS {
+        let off = (duration - f64::from(query.duration_ms) / 1000.0).abs();
+        if off > MAX_DRIFT_SECS {
             return None;
         }
-        score += ((MAX_DRIFT_SECS - drift) * 10.0) as i64;
+        drift = Some(off);
+        score += ((MAX_DRIFT_SECS - off) * 10.0) as i64;
+    }
+    // twerkz: another artist's song of the same name is not this one; only
+    // a near-identical length vouches for an artist spelled another way.
+    if !same_artist && drift.is_none_or(|off| off > 3.0) {
+        return None;
     }
     // Timing is the point, so a synced upload wins a tie.
     if record.synced().is_some() {
