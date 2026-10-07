@@ -993,7 +993,11 @@ fn local_track(item: &AudioItem) -> LocalTrack {
     };
     let mut covers: Vec<_> = item.covers.iter().collect();
     covers.sort_by_key(|cover| std::cmp::Reverse(cover.width));
-    let art_url = covers.first().map(|cover| cover.url.clone());
+    // twerkz: a local file has no cover URL; its own URI loads the one inside it.
+    let art_url = covers
+        .first()
+        .map(|cover| cover.url.clone())
+        .or_else(|| item.uri.starts_with("spotify:local:").then(|| item.uri.clone()));
     let art_small_url = covers
         .iter()
         .rev()
