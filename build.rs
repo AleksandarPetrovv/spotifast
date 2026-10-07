@@ -51,7 +51,7 @@ fn main() {
         resource
             .set_icon("packaging/windows/spotifast.ico")
             .set("ProductName", "Spotifast")
-            .set("FileDescription", "A native Spotify client");
+            .set("FileDescription", "Spotifast");
         if let Err(error) = resource.compile() {
             println!("cargo:warning=Windows resources not embedded: {error}");
         }
