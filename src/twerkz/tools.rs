@@ -190,10 +190,12 @@ async fn fetch_ffmpeg(http: &reqwest::Client, dir: &Path, target: &Path) -> Resu
             unzip_one(&archive, "ffmpeg.exe", target)?;
         }
         "macos" => {
-            download(http, "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip", &archive).await?;
+            let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "amd64" };
+            let base = format!("https://ffmpeg.martin-riedl.de/redirect/latest/macos/{arch}/release");
+            download(http, &format!("{base}/ffprobe.zip"), &archive).await?;
             unzip_one(&archive, "ffprobe", &folder.join("ffprobe"))?;
             make_executable(&folder.join("ffprobe"))?;
-            download(http, "https://evermeet.cx/ffmpeg/getrelease/zip", &archive).await?;
+            download(http, &format!("{base}/ffmpeg.zip"), &archive).await?;
             unzip_one(&archive, "ffmpeg", target)?;
             make_executable(target)?;
         }
