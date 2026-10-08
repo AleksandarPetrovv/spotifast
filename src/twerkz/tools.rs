@@ -105,10 +105,17 @@ pub async fn ensure(http: &reqwest::Client, dir: &Path, status: &(dyn Fn(String)
     Ok(tools)
 }
 
-/// `name` on PATH, if it runs.
+/// `name` on PATH, if it runs. Apps opened from the Finder get a bare PATH,
+/// so Homebrew's folders are searched after it on macOS.
 async fn usable(name: &str, version_flag: &str) -> Option<PathBuf> {
-    let paths = std::env::var_os("PATH")?;
-    let path = std::env::split_paths(&paths)
+    let mut dirs: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).collect())
+        .unwrap_or_default();
+    if cfg!(target_os = "macos") {
+        dirs.extend(["/opt/homebrew/bin", "/usr/local/bin"].map(PathBuf::from));
+    }
+    let path = dirs
+        .into_iter()
         .map(|dir| dir.join(format!("{name}{EXE}")))
         .find(|path| path.is_file())?;
     let mut check = command(&path);
