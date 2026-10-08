@@ -111,22 +111,51 @@ fn bank_paths(bank: &[u8]) -> Vec<String> {
     let mut at = 0;
     while at + 3 < bank.len() {
         let windows = bank[at].is_ascii_alphabetic() && bank[at + 1] == b':' && bank[at + 2] == b'\\';
-        let unix = bank[at] == b'/' && at > 0 && bank[at - 1] < 0x20 && bank[at + 1].is_ascii_alphanumeric();
+        let unix = bank[at] == b'/' && bank[at + 1].is_ascii_alphanumeric();
         if !windows && !unix {
             at += 1;
             continue;
         }
-        let end = bank[at..]
-            .iter()
-            .position(|byte| *byte < 0x20)
-            .map_or(bank.len(), |offset| at + offset);
-        let path = String::from_utf8_lossy(&bank[at..end]).into_owned();
-        if std::path::Path::new(&path).extension().is_some() {
-            paths.push(path);
+        // Unix paths carry their length before them; Windows ones end at a
+        // control byte.
+        let ends = if unix {
+            prefixed_lens(bank, at).into_iter().flatten().map(|len| at + len).collect()
+        } else {
+            vec![bank[at..]
+                .iter()
+                .position(|byte| *byte < 0x20)
+                .map_or(bank.len(), |offset| at + offset)]
+        };
+        let found = ends.into_iter().find_map(|end| {
+            let path = std::str::from_utf8(bank.get(at..end)?).ok()?;
+            (!path.chars().any(char::is_control) && std::path::Path::new(path).extension().is_some())
+                .then(|| (path.to_string(), end))
+        });
+        match found {
+            Some((path, end)) => {
+                paths.push(path);
+                at = end;
+            }
+            None => at += 1,
         }
-        at = end;
     }
     paths
+}
+
+/// The varint length right before `at`, read as two bytes and as one.
+fn prefixed_lens(bank: &[u8], at: usize) -> [Option<usize>; 2] {
+    let Some(&last) = at.checked_sub(1).and_then(|index| bank.get(index)) else {
+        return [None, None];
+    };
+    if last & 0x80 != 0 {
+        return [None, None];
+    }
+    let two = at
+        .checked_sub(2)
+        .and_then(|index| bank.get(index))
+        .filter(|first| **first & 0x80 != 0)
+        .map(|first| (*first as usize & 0x7f) | (last as usize) << 7);
+    [two, Some(last as usize)]
 }
 
 pub fn tools_dir(dirs: &AppDirs) -> PathBuf {
