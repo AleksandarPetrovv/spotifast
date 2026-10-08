@@ -293,6 +293,12 @@ fn make_executable(path: &Path) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))?;
     }
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("/usr/bin/xattr")
+        .args(["-d", "com.apple.quarantine"])
+        .arg(path)
+        .stderr(std::process::Stdio::null())
+        .status();
     let _ = path;
     Ok(())
 }
