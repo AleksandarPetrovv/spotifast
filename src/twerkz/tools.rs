@@ -56,6 +56,21 @@ pub async fn ensure(http: &reqwest::Client, dir: &Path, status: &(dyn Fn(String)
     );
     let ytdlp = match on_path_ytdlp {
         Some(path) => path,
+        // The one-file macOS build unpacks itself on every run and macOS
+        // scans it each time, so the unpacked folder is kept instead.
+        None if cfg!(target_os = "macos") => {
+            let folder = dir.join("yt-dlp_macos");
+            let own = folder.join("yt-dlp_macos");
+            if !own.is_file() {
+                status("Downloading yt-dlp…".to_string());
+                fetch_ytdlp_folder(http, dir, &folder).await?;
+            } else if stale(&own)
+                && let Err(error) = fetch_ytdlp_folder(http, dir, &folder).await
+            {
+                log::warn!("yt-dlp could not update: {error:#}");
+            }
+            own
+        }
         None => {
             let own = dir.join(format!("yt-dlp{EXE}"));
             if !own.is_file() {
@@ -168,6 +183,15 @@ fn ytdlp_url() -> Result<&'static str> {
         ("linux", _) => concat!("https://github.com/yt-dlp/yt-dlp/releases/latest/download/", "yt-dlp_linux"),
         _ => bail!("no yt-dlp build for this platform at {BASE}"),
     })
+}
+
+async fn fetch_ytdlp_folder(http: &reqwest::Client, dir: &Path, folder: &Path) -> Result<()> {
+    let archive = dir.join("yt-dlp_macos.zip");
+    download(http, "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos.zip", &archive).await?;
+    unzip_folder(&archive, "", folder)?;
+    let _ = std::fs::remove_file(&archive);
+    let _ = std::fs::remove_file(dir.join("yt-dlp"));
+    make_executable(&folder.join("yt-dlp_macos"))
 }
 
 fn deno_url() -> Option<&'static str> {
