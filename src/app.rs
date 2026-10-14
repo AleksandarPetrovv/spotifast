@@ -448,6 +448,8 @@ pub struct App {
     playlist_headers: HashMap<String, Playlist>,
     /// Blank library playlists already asked about.
     playlist_headers_requested: HashSet<String>,
+    /// The remembered playback context already loaded for Previous and Next.
+    resume_context_asked: Option<String>,
     /// Album URIs positively identified as EPs by librespot.
     confirmed_ep_albums: HashSet<String>,
     /// Built table rows, keyed by page. Capped; dropped on reset and eviction.
@@ -972,6 +974,7 @@ impl App {
             audiobooks_requested: HashSet::new(),
             playlist_headers: HashMap::new(),
             playlist_headers_requested: HashSet::new(),
+            resume_context_asked: None,
             confirmed_ep_albums: HashSet::new(),
             table_rows: HashMap::new(),
             page_used: HashMap::new(),
@@ -2520,6 +2523,7 @@ impl App {
 
     /// Clears account data while preserving request serials that reject late answers.
     fn reset_data(&mut self) {
+        self.resume_context_asked = None;
         self.local_transfer_sequence = None;
         self.queue_start_pending = None;
         self.pending_album_queues.clear();
@@ -2806,6 +2810,12 @@ impl App {
         if self.context_track_uris(&context).is_some() {
             return;
         }
+        // Once per context: a deleted playlist fails every time, and asking
+        // again on each frame floods Spotify until it rate limits the app.
+        if self.resume_context_asked.as_deref() == Some(context.as_str()) {
+            return;
+        }
+        self.resume_context_asked = Some(context.clone());
         if let Some(page) = Page::decode(&Self::context_page(&context)) {
             self.ensure_loaded(page);
         }
