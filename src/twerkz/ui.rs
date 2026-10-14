@@ -439,6 +439,17 @@ fn import_summary(rows: &[Row]) -> Result<String, String> {
     }
 }
 
+/// Songs added over the session change the playlist outside the app's own
+/// write tracking, so a write snapshot it still waits for never comes and
+/// would hold back the reload.
+fn changed_outside(app: &mut App, playlist_id: &str) {
+    if let Some(page) = app.playlist_pages.get_mut(playlist_id) {
+        page.optimistic_snapshot = None;
+        page.snapshot_rechecks = 0;
+        page.refresh_after_write = false;
+    }
+}
+
 fn on_imported(app: &mut App, id: u64, playlist_id: &str, index: usize, total: usize, step: &Step) {
     let reload = crate::model::Action::Reload(crate::model::Page::Playlist(playlist_id.to_string()));
     let Some(job) = app.twerkz.jobs.iter_mut().find(|job| job.id == id) else {
@@ -464,6 +475,7 @@ fn on_imported(app: &mut App, id: u64, playlist_id: &str, index: usize, total: u
                 .is_none_or(|last| last.elapsed().as_secs() >= 3)
             {
                 app.twerkz.reloaded = Some(Instant::now());
+                changed_outside(app, playlist_id);
                 app.actions.push(reload);
             }
         }
@@ -490,6 +502,7 @@ fn on_imported(app: &mut App, id: u64, playlist_id: &str, index: usize, total: u
                 Err(error) => job.end(true, error.clone()),
             }
             if added > 0 {
+                changed_outside(app, playlist_id);
                 app.actions.push(reload);
                 // The engine reads its local files when it starts, so the
                 // new songs play only after a restart, which also rescans.
