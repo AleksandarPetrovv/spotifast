@@ -338,40 +338,19 @@ pub fn strip_html(text: &str) -> String {
         .replace("&gt;", ">")
 }
 
-/// Atomically replaces `path` with `temporary` on the current platform.
-#[cfg(not(windows))]
-pub(crate) fn replace_file(
-    temporary: &std::path::Path,
-    path: &std::path::Path,
-) -> std::io::Result<()> {
-    std::fs::rename(temporary, path)
-}
-
-/// Atomically replaces `path` with `temporary` on Windows.
-#[cfg(windows)]
-pub(crate) fn replace_file(
-    temporary: &std::path::Path,
-    path: &std::path::Path,
-) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
-    };
-
-    let temporary: Vec<u16> = temporary.as_os_str().encode_wide().chain(Some(0)).collect();
-    let path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-    let moved = unsafe {
-        MoveFileExW(
-            temporary.as_ptr(),
-            path.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if moved == 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
+/// The temporary files a replacement (fastframe-file) left in `dir`, which
+/// a finished or failed one never does.
+#[cfg(test)]
+pub(crate) fn temporary_files(dir: &std::path::Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .map(|entries| {
+            entries
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .filter(|name| name.ends_with(".tmp"))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -528,6 +507,25 @@ mod tests {
             ("2026-08-17T12:00:00Z", "2 hafta önce"),
         ] {
             assert_eq!(format_relative_date(Locale::Turkish, added, now), expected);
+        }
+        assert_eq!(
+            format_date(Locale::Ukrainian, "2024-01-05"),
+            "5 січ. 2024 р."
+        );
+        assert_eq!(format_date(Locale::Ukrainian, "2024-09"), "вер. 2024 р.");
+        assert_eq!(format_total_ms(Locale::Ukrainian, 7_980_000), "2 год 13 хв");
+        assert_eq!(format_episode_ms(Locale::Ukrainian, 2_280_000), "38 хв");
+        for (added, expected) in [
+            ("2026-08-31T11:59:59Z", "1 секунду тому"),
+            ("2026-08-31T11:58:00Z", "2 хвилини тому"),
+            ("2026-08-31T07:00:00Z", "5 годин тому"),
+            ("2026-08-30T12:00:00Z", "1 день тому"),
+            ("2026-08-17T12:00:00Z", "2 тижні тому"),
+        ] {
+            assert_eq!(
+                format_relative_date(Locale::Ukrainian, added, now),
+                expected
+            );
         }
     }
 

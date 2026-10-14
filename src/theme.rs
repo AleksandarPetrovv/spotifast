@@ -197,6 +197,17 @@ pub const PLAYER_BAR_HEIGHT: f32 = 88.0;
 /// has to suit the other, or the window would jump on the swap.
 pub const SIDE_PANEL_MIN_WIDTH: f32 = 280.0;
 pub const TOP_BAR_HEIGHT: f32 = 56.0;
+pub const CUSTOM_TOP_BAR_HEIGHT: f32 = 48.0;
+
+/// Keep the custom Windows header close to its 36-point caption controls.
+/// Linux's custom title bar keeps the ordinary height.
+pub fn top_bar_height() -> f32 {
+    if cfg!(windows) && crate::window::custom_titlebar() {
+        CUSTOM_TOP_BAR_HEIGHT
+    } else {
+        TOP_BAR_HEIGHT
+    }
+}
 
 /// macOS hides the titlebar and draws the window content all the way to the
 /// top edge, so whatever sits at the top of the window has to leave room for
@@ -363,7 +374,7 @@ fn apply_to_style(style: &mut egui::Style, palette: &Palette) {
     };
     style.interaction.selectable_labels = false;
     style.interaction.tooltip_delay = 0.4;
-    style.animation_time = 0.12;
+    style.animation_time = crate::motion::ANIMATION_TIME;
     style.url_in_tooltip = false;
 }
 
@@ -473,6 +484,7 @@ fastframe_icons::icons! {
         Volume2 => lucide "volume-2",
         VolumeX => lucide "volume-x",
         Watch => "watch",
+        WifiOff => "wifi-off",
         X => lucide "x",
         Zap => "zap",
         Download => "download",
@@ -510,6 +522,12 @@ pub fn focus_ring(ui: &egui::Ui, response: &Response) {
     }
 }
 
+/// The padding [`icon_button`] keeps around its glyph on every side. A
+/// caller that places an icon button inside a fixed box must give the box
+/// at least `size + ICON_BUTTON_PAD`: in a tighter one, egui clamps the
+/// centered layout to the box's top edge and the glyph lands off-center.
+pub const ICON_BUTTON_PAD: f32 = 12.0;
+
 /// A frameless icon control whose colour lifts on hover.
 pub fn icon_button(
     ui: &mut egui::Ui,
@@ -519,7 +537,7 @@ pub fn icon_button(
     hover: Color32,
     tooltip: &str,
 ) -> Response {
-    let edge = size + 12.0;
+    let edge = size + ICON_BUTTON_PAD;
     let (rect, response) = ui.allocate_exact_size(Vec2::splat(edge), Sense::click());
     response.widget_info(|| {
         egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), tooltip)
@@ -796,6 +814,36 @@ fn soft_button_inner(
         focus_ring(ui, &dismiss);
     }
     (response, dismissed)
+}
+
+/// Asks for the next frame `interval` from now.
+///
+/// egui takes one predicted frame off every delayed repaint, and egui-winit
+/// leaves that prediction at 1/60 s whatever the display, so asking egui for
+/// 33 ms brought the frame back after 16 ms. The prediction is added back
+/// here, for animations that mean to run slower than the display.
+pub fn repaint_after(ctx: &egui::Context, interval: std::time::Duration) {
+    let predicted = ctx.input(|input| input.predicted_dt);
+    ctx.request_repaint_after(interval + std::time::Duration::from_secs_f32(predicted));
+}
+
+/// How often a moving visualiser is drawn: sixty times a second, as Winamp
+/// drew its analyser.
+const VISUALISER_FRAME: std::time::Duration = std::time::Duration::from_micros(16_667);
+
+/// Asks for a moving visualiser's next frame within `budget`: as designed,
+/// at half rate when out of focus or saving energy, and none when nobody can
+/// see it.
+pub fn visualiser_frame(ctx: &egui::Context, budget: crate::power::Budget) {
+    use crate::power::Budget;
+    match budget {
+        // egui subtracts one predicted frame from delayed repaints; the
+        // display supplies it, through the vsync swap or, on Wayland, the
+        // compositor's frame callback that eframe waits for.
+        Budget::Normal => ctx.request_repaint_after(VISUALISER_FRAME),
+        Budget::Saver => repaint_after(ctx, VISUALISER_FRAME * 2),
+        Budget::Background => {}
+    }
 }
 
 /// An animated busy indicator paced independently of the graphics driver.
@@ -1106,5 +1154,35 @@ mod tests {
             assert!(galley.rows[0].glyphs.len() >= 10);
         });
         output.textures_delta.clear();
+    }
+
+    /// An animation asking for its next frame in 33 ms gets it in 33 ms, not
+    /// in the 16 ms left after egui's predicted frame.
+    #[test]
+    fn a_timed_repaint_waits_the_whole_interval() {
+        let ctx = egui::Context::default();
+        let delays = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = std::sync::Arc::clone(&delays);
+        ctx.set_request_repaint_callback(move |info| seen.lock().unwrap().push(info.delay));
+        repaint_after(&ctx, std::time::Duration::from_millis(33));
+        let delays = delays.lock().unwrap();
+        assert_eq!(delays.len(), 1);
+        let ms = delays[0].as_secs_f64() * 1_000.0;
+        assert!((ms - 33.0).abs() < 0.5, "{ms} ms");
+    }
+
+    /// A visualiser nobody can see asks for no frames at all.
+    #[test]
+    fn an_unseen_visualiser_asks_for_no_frame() {
+        let ctx = egui::Context::default();
+        let asked = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let seen = std::sync::Arc::clone(&asked);
+        ctx.set_request_repaint_callback(move |_| {
+            seen.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        });
+        visualiser_frame(&ctx, crate::power::Budget::Background);
+        assert_eq!(asked.load(std::sync::atomic::Ordering::Relaxed), 0);
+        visualiser_frame(&ctx, crate::power::Budget::Saver);
+        assert_eq!(asked.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
 }

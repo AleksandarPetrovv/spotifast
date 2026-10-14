@@ -7,7 +7,6 @@ pub mod download;
 pub mod emoji;
 pub mod import;
 pub mod jobs;
-pub mod library;
 pub mod lyrics;
 pub mod playlist;
 pub mod romanize;

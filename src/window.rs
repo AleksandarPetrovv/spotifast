@@ -13,6 +13,42 @@ pub fn on_top_unavailable(locale: crate::i18n::Locale) -> std::borrow::Cow<'stat
     )
 }
 
+/// Says why no window opened on Windows on ARM and offers the fix.
+///
+/// Snapdragon graphics drivers have no OpenGL of their own. Windows provides
+/// it on ARM through Microsoft's compatibility pack, a Store app that
+/// translates it to Direct3D 12, so a missing or broken pack leaves eframe
+/// without a context and the app would otherwise close without a word.
+#[cfg(all(windows, target_arch = "aarch64"))]
+pub fn report_missing_opengl(locale: crate::i18n::Locale) {
+    use crate::i18n::gettext;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{IDYES, MB_ICONERROR, MB_YESNO, MessageBoxW};
+    /// The Store page of the OpenCL, OpenGL & Vulkan Compatibility Pack.
+    const STORE_PAGE: &str = "ms-windows-store://pdp/?ProductId=9NQPSL29BFFF";
+
+    let wide = |text: &str| text.encode_utf16().chain([0]).collect::<Vec<u16>>();
+    let title = wide(&gettext(locale, "Spotifast cannot open its window"));
+    let text = wide(&gettext(
+        locale,
+        "On Windows on ARM, the OpenGL that Spotifast draws with comes from Microsoft's OpenCL, OpenGL & Vulkan Compatibility Pack. Open its Microsoft Store page to install or repair it?",
+    ));
+    // SAFETY: both strings are NUL-terminated UTF-16 that outlive the call,
+    // and the box has no owner window.
+    let answer = unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            text.as_ptr(),
+            title.as_ptr(),
+            MB_YESNO | MB_ICONERROR,
+        )
+    };
+    if answer == IDYES
+        && let Err(error) = open::that(STORE_PAGE)
+    {
+        log::warn!("cannot open the Microsoft Store: {error}");
+    }
+}
+
 /// Handles a macOS title-bar double-click, or leaves a first click to drag.
 #[cfg(target_os = "macos")]
 pub fn macos_titlebar_should_drag() -> bool {
@@ -180,64 +216,6 @@ mod x11 {
     }
 }
 
-/// Whether the window already covers the screen, maximized or full screen.
-///
-/// eframe restores that state as it creates the window, and sizing or moving
-/// the window afterwards restores it down again.
-pub fn fills_the_screen(viewport: &egui::ViewportInfo) -> bool {
-    viewport.maximized.unwrap_or(false) || viewport.fullscreen.unwrap_or(false)
-}
-
-/// Checks a position in egui points against the fixed coordinate limits.
-#[cfg(not(windows))]
-pub fn can_restore(pos: [f32; 2], _pixels_per_point: f32) -> bool {
-    // Wayland ignores window moves; keep the old limits on other platforms.
-    (-1000.0..=5000.0).contains(&pos[0]) && (-1000.0..=5000.0).contains(&pos[1])
-}
-
-#[cfg(any(windows, test))]
-fn titlebar_anchor(pos: [f32; 2], pixels_per_point: f32) -> Option<egui::Pos2> {
-    // A maximized window can start at (-8, -8), so check a point inside
-    // its title bar. Convert from egui points to pixels for Win32.
-    let anchor = (egui::pos2(pos[0], pos[1]) + egui::vec2(32.0, 16.0)) * pixels_per_point;
-    (pixels_per_point.is_finite() && pixels_per_point > 0.0 && anchor.is_finite()).then_some(anchor)
-}
-
-/// Checks that the saved position leaves the title bar in a monitor's work area.
-#[cfg(windows)]
-pub fn can_restore(pos: [f32; 2], pixels_per_point: f32) -> bool {
-    use windows_sys::Win32::Foundation::POINT;
-    use windows_sys::Win32::Graphics::Gdi::{
-        GetMonitorInfoW, MONITOR_DEFAULTTONULL, MONITORINFO, MonitorFromPoint,
-    };
-
-    let Some(anchor) = titlebar_anchor(pos, pixels_per_point) else {
-        return false;
-    };
-    let point = POINT {
-        x: anchor.x as i32,
-        y: anchor.y as i32,
-    };
-    let mut info = MONITORINFO {
-        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-        ..Default::default()
-    };
-    unsafe {
-        // Asking for the nearest monitor would also accept off-screen positions.
-        let monitor = MonitorFromPoint(point, MONITOR_DEFAULTTONULL);
-        if monitor.is_null() || GetMonitorInfoW(monitor, &mut info) == 0 {
-            return false;
-        }
-    }
-    // Use the work area so the title bar cannot end up behind the taskbar.
-    let area = info.rcWork;
-    egui::Rect::from_min_max(
-        egui::pos2(area.left as f32, area.top as f32),
-        egui::pos2(area.right as f32, area.bottom as f32),
-    )
-    .contains(anchor)
-}
-
 /// The main window's smallest size with no side panel open. The page and
 /// its top bar fit beside the narrowest sidebar from here.
 pub const MAIN_MIN_SIZE: [f32; 2] = [760.0, 520.0];
@@ -255,14 +233,139 @@ pub fn set_fixed_size(on: bool) {
     FIXED_SIZE.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// A title-bar action.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowButton {
+    Minimize,
+    Maximize,
+    Close,
+}
+
+#[cfg(target_os = "linux")]
+pub struct LinuxWindowControls {
+    pub left: Vec<WindowButton>,
+    pub right: Vec<WindowButton>,
+}
+
+#[cfg(target_os = "linux")]
+static LINUX_CONTROLS: std::sync::OnceLock<LinuxWindowControls> = std::sync::OnceLock::new();
+
+#[cfg(target_os = "linux")]
+pub(crate) static LINUX_ICONS: std::sync::OnceLock<[Option<Vec<u8>>; 4]> =
+    std::sync::OnceLock::new();
+
+/// Read desktop preferences at startup, before any UI is drawn. They come
+/// through the desktop portal, which answers inside a Flatpak too, and each
+/// read gives up after about a second. No GTK dependency or desktop
+/// subprocess is needed while rendering a frame.
+#[cfg(target_os = "linux")]
+pub fn init_linux_window_controls() {
+    LINUX_CONTROLS.get_or_init(|| {
+        if fastframe_desktop::is_gnome() {
+            let layout =
+                fastframe_desktop::setting("org.gnome.desktop.wm.preferences", "button-layout")
+                    .and_then(|layout| parse_linux_controls(&layout))
+                    .filter(|controls| !controls.left.is_empty() || !controls.right.is_empty());
+            layout.unwrap_or_else(|| parse_linux_controls(":close").unwrap())
+        } else {
+            parse_linux_controls(":minimize,maximize,close").unwrap()
+        }
+    });
+    LINUX_ICONS.get_or_init(|| {
+        let theme = fastframe_desktop::setting("org.gnome.desktop.interface", "icon-theme")
+            .map(|theme| theme.trim().trim_matches('\'').to_owned())
+            .filter(|theme| !theme.contains('/') && theme != "." && theme != "..")
+            .unwrap_or_else(|| "Adwaita".into());
+        let mut roots = Vec::new();
+        if let Some(dirs) = directories::BaseDirs::new() {
+            roots.push(dirs.data_dir().join("icons"));
+            roots.push(dirs.home_dir().join(".icons"));
+        }
+        roots.extend(
+            std::env::split_paths(
+                &std::env::var_os("XDG_DATA_DIRS")
+                    .unwrap_or_else(|| "/usr/local/share:/usr/share".into()),
+            )
+            .map(|root| root.join("icons")),
+        );
+        [
+            "window-minimize-symbolic",
+            "window-maximize-symbolic",
+            "window-close-symbolic",
+            "window-restore-symbolic",
+        ]
+        .map(|name| {
+            for theme in [theme.as_str(), "Adwaita"] {
+                for root in &roots {
+                    for folder in [
+                        "symbolic/ui",
+                        "symbolic/actions",
+                        "scalable/actions",
+                        "16x16/actions",
+                    ] {
+                        if let Ok(svg) = std::fs::read_to_string(
+                            root.join(theme).join(folder).join(format!("{name}.svg")),
+                        ) && svg.contains("</svg>")
+                        {
+                            // SVG loaders do not apply GTK's symbolic colour palette.
+                            // Set monochrome fills to white so egui can tint them.
+                            let fill = concat!(
+                                "<style>path,rect,circle,ellipse,polygon,polyline",
+                                " { fill: white !important; }</style></svg>",
+                            );
+                            return Some(svg.replace("</svg>", fill).into_bytes());
+                        }
+                    }
+                }
+            }
+            None
+        })
+    });
+}
+
+#[cfg(target_os = "linux")]
+pub fn linux_window_controls() -> &'static LinuxWindowControls {
+    LINUX_CONTROLS.get_or_init(|| parse_linux_controls(":minimize,maximize,close").unwrap())
+}
+
+#[cfg(target_os = "linux")]
+fn parse_linux_controls(layout: &str) -> Option<LinuxWindowControls> {
+    use WindowButton::*;
+    let layout = layout.trim().trim_matches('\'');
+    let (left, right) = layout.split_once(':')?;
+    let mut seen = Vec::new();
+    let mut buttons = |side: &str| {
+        side.split(',')
+            .filter_map(|name| match name.trim() {
+                "minimize" => Some(Minimize),
+                "maximize" => Some(Maximize),
+                "close" => Some(Close),
+                _ => None,
+            })
+            .filter(|button| {
+                if seen.contains(button) {
+                    false
+                } else {
+                    seen.push(*button);
+                    true
+                }
+            })
+            .collect()
+    };
+    Some(LinuxWindowControls {
+        left: buttons(left),
+        right: buttons(right),
+    })
+}
+
 static CUSTOM_TITLEBAR: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Whether the main window draws its own title bar and window buttons
-/// instead of the platform's frame. Only Windows offers the choice, and it
+/// instead of the platform's frame. Windows and Linux offer the choice, and it
 /// is off unless the listener turns it on in Settings.
 pub fn custom_titlebar() -> bool {
     custom_titlebar_for(
-        cfg!(windows),
+        cfg!(any(windows, target_os = "linux")),
         CUSTOM_TITLEBAR.load(std::sync::atomic::Ordering::Relaxed),
     )
 }
@@ -272,16 +375,33 @@ pub fn set_custom_titlebar(on: bool) {
     CUSTOM_TITLEBAR.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
-const fn custom_titlebar_for(on_windows: bool, chosen: bool) -> bool {
-    on_windows && chosen
+const fn custom_titlebar_for(supported: bool, chosen: bool) -> bool {
+    supported && chosen
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// The portal gives GNOME's button layout as a plain string, where
+    /// gsettings quoted it; both read the same, and a side may be empty.
+    #[cfg(target_os = "linux")]
     #[test]
-    fn only_windows_draws_its_own_title_bar_and_only_when_chosen() {
+    fn gnome_button_layouts_read_with_or_without_quotes() {
+        use WindowButton::*;
+        for layout in ["appmenu:minimize,close", "'appmenu:minimize,close'\n"] {
+            let controls = parse_linux_controls(layout).unwrap();
+            assert!(controls.left.is_empty());
+            assert_eq!(controls.right, [Minimize, Close]);
+        }
+        let controls = parse_linux_controls("close,maximize,close:").unwrap();
+        assert_eq!(controls.left, [Close, Maximize], "each button once");
+        assert!(controls.right.is_empty());
+        assert!(parse_linux_controls("close").is_none(), "no side marker");
+    }
+
+    #[test]
+    fn supported_platforms_draw_the_custom_title_bar_only_when_chosen() {
         assert!(custom_titlebar_for(true, true));
         assert!(!custom_titlebar_for(true, false));
         assert!(!custom_titlebar_for(false, true));
@@ -397,60 +517,5 @@ mod tests {
         connection.destroy_window(window).unwrap();
         connection.flush().unwrap();
         assert_eq!(states, vec![above, skip]);
-    }
-
-    fn reachable(pos: [f32; 2], scale: f32, area: [f32; 4]) -> bool {
-        let rect =
-            egui::Rect::from_min_max(egui::pos2(area[0], area[1]), egui::pos2(area[2], area[3]));
-        titlebar_anchor(pos, scale).is_some_and(|anchor| rect.contains(anchor))
-    }
-
-    #[test]
-    fn disconnected_monitor_position_is_not_restored() {
-        assert!(!reachable([1912.0, -8.0], 1.0, [0.0, 0.0, 1920.0, 1032.0]));
-        assert!(reachable(
-            [1912.0, -8.0],
-            1.0,
-            [1920.0, 0.0, 3840.0, 1080.0]
-        ));
-    }
-
-    #[test]
-    fn visible_positions_include_maximized_and_negative_coordinates() {
-        assert!(reachable([-8.0, -8.0], 1.0, [0.0, 0.0, 1920.0, 1032.0]));
-        assert!(reachable(
-            [-1920.0, 100.0],
-            1.0,
-            [-1920.0, 0.0, 0.0, 1080.0]
-        ));
-    }
-
-    #[test]
-    fn logical_coordinates_are_scaled_to_monitor_pixels() {
-        assert!(reachable([900.0, 100.0], 2.0, [0.0, 0.0, 1920.0, 1080.0]));
-        assert!(!reachable([1000.0, 100.0], 2.0, [0.0, 0.0, 1920.0, 1080.0]));
-    }
-
-    #[test]
-    fn only_a_maximized_or_full_screen_window_fills_the_screen() {
-        let state = |maximized, fullscreen| {
-            fills_the_screen(&egui::ViewportInfo {
-                maximized,
-                fullscreen,
-                ..Default::default()
-            })
-        };
-        assert!(state(Some(true), Some(false)));
-        assert!(state(Some(false), Some(true)));
-        assert!(!state(Some(false), Some(false)));
-        // A backend that does not report the state leaves the window ordinary.
-        assert!(!state(None, None));
-    }
-
-    #[test]
-    fn invalid_coordinates_and_scale_are_rejected() {
-        assert!(titlebar_anchor([f32::NAN, 0.0], 1.0).is_none());
-        assert!(titlebar_anchor([0.0, f32::INFINITY], 1.0).is_none());
-        assert!(titlebar_anchor([0.0, 0.0], 0.0).is_none());
     }
 }

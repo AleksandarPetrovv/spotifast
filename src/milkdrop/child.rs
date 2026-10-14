@@ -209,6 +209,14 @@ struct Child {
     last_click: Option<Instant>,
     next_frame: Instant,
     reported: Option<([f32; 2], [f32; 2])>,
+    /// The screen the window was last on: on a Mac that switches graphics
+    /// by itself, another screen can mean another GPU.
+    #[cfg(target_os = "macos")]
+    screen: Option<winit::monitor::MonitorHandle>,
+    /// The window is covered (macOS and X11; winit does not report it on
+    /// Windows) or, on Wayland, suspended: nothing is drawn until it shows
+    /// again.
+    occluded: bool,
 }
 
 impl Child {
@@ -239,6 +247,9 @@ impl Child {
             last_click: None,
             next_frame: Instant::now(),
             reported: None,
+            #[cfg(target_os = "macos")]
+            screen: None,
+            occluded: false,
         }
     }
 
@@ -408,6 +419,38 @@ impl Child {
         let size = live.window.inner_size();
         self.pointer.x >= size.width as f64 - 16.0 && self.pointer.y >= size.height as f64 - 16.0
     }
+
+    /// With automatic graphics switching, a window moved to another screen
+    /// can land on another GPU, and Apple asks that a context managed by
+    /// hand be updated before it draws there; glutin's resize is that
+    /// update. Only a change of screen asks for it, not every step of a drag.
+    #[cfg(target_os = "macos")]
+    fn follow_screen(&mut self) {
+        let Some(live) = &self.live else {
+            return;
+        };
+        let screen = live.window.current_monitor();
+        if screen == self.screen {
+            return;
+        }
+        self.screen = screen;
+        let size = live.window.inner_size();
+        if let (Some(width), Some(height)) =
+            (NonZeroU32::new(size.width), NonZeroU32::new(size.height))
+        {
+            live.surface.resize(&live.context, width, height);
+            live.window.request_redraw();
+        }
+    }
+
+    /// Nobody can see the window: it is covered, suspended or minimised.
+    fn hidden(&self) -> bool {
+        self.occluded
+            || self
+                .live
+                .as_ref()
+                .is_some_and(|live| live.window.is_minimized() == Some(true))
+    }
 }
 
 impl ApplicationHandler<Control> for Child {
@@ -456,6 +499,8 @@ impl ApplicationHandler<Control> for Child {
                     live.window.request_redraw();
                 }
             }
+            #[cfg(target_os = "macos")]
+            WindowEvent::Moved(_) => self.follow_screen(),
             WindowEvent::CursorMoved { position, .. } => self.pointer = position,
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
             WindowEvent::MouseInput {
@@ -466,9 +511,17 @@ impl ApplicationHandler<Control> for Child {
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 self.on_key(event.logical_key, event_loop);
             }
-            WindowEvent::RedrawRequested => {
+            // A control or a key can ask for a frame while the window is
+            // hidden; it is drawn when the window shows again.
+            WindowEvent::RedrawRequested if !self.hidden() => {
                 self.render();
                 self.schedule_next_frame();
+            }
+            WindowEvent::Occluded(occluded) => {
+                self.occluded = occluded;
+                if !occluded && let Some(live) = &self.live {
+                    live.window.request_redraw();
+                }
             }
             _ => {}
         }
@@ -479,6 +532,13 @@ impl ApplicationHandler<Control> for Child {
             event_loop.set_control_flow(winit::event_loop::ControlFlow::Wait);
             return;
         };
+        // A window nobody can see renders nothing. Showing it again brings
+        // an event (Occluded, or a resize back from a minimised size) that
+        // asks for the next frame.
+        if self.hidden() {
+            event_loop.set_control_flow(winit::event_loop::ControlFlow::Wait);
+            return;
+        }
         match self.frame_interval() {
             None => {
                 live.window.request_redraw();

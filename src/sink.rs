@@ -10,12 +10,12 @@
 //! paused player costs no audio work (#636), follows the system's default
 //! output and reopens after a failure. rodio's mixer and queue fill it.
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering, fence};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use fastframe_audio::{Buffer, BufferSize, Maintained, OutputOptions, Render};
+use fastframe_audio::{Buffer, BufferSize, Maintained, OutputOptions, Reason, Render};
 use librespot_playback::audio_backend::{Sink, SinkError, SinkResult};
 use librespot_playback::convert::Converter;
 use librespot_playback::decoder::AudioPacket;
@@ -43,14 +43,27 @@ type Opener = fn(Option<&str>, u32, &AudioControl) -> Result<Output, OpenError>;
 /// Maximum queued rodio chunks before `write` blocks, about 200 ms of audio.
 const QUEUE_LIMIT: usize = 12;
 
+/// How much of a full queue rodio plays before `write` is woken to top it
+/// up. librespot's packets hold 4 to 13 ms of sound, so polling every 10 ms
+/// (or waking for every packet) kept the decoder thread awake about 100
+/// times a second; this wakes it about 30 times.
+const REFILL: Duration = Duration::from_millis(20);
+
+/// Longest `write` waits for rodio before it looks at the device again: a
+/// stream that has failed or stopped playing finishes no chunk to wake it.
+const QUEUE_WAIT: Duration = Duration::from_millis(50);
+
 /// Maximum time `stop` waits for the queue to drain.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Length of each side of an interrupted-track fade.
-const INTERRUPT_FADE: Duration = Duration::from_millis(10);
+const INTERRUPT_FADE: Duration = Duration::from_millis(50);
 
-/// How long Play takes to come up, and Pause to go down.
-const TRANSPORT_FADE: Duration = Duration::from_millis(250);
+/// How long Play takes to come up, and Pause and Stop to go down.
+const TRANSPORT_FADE: Duration = Duration::from_millis(50);
+
+/// Smooths slider and mute changes at the device's sample rate.
+const VOLUME_RAMP: Duration = Duration::from_millis(30);
 
 /// Default Windows device buffer length in milliseconds.
 ///
@@ -75,6 +88,7 @@ pub struct AudioControl {
     target: Mutex<AudioTarget>,
     waiting_for_track: AtomicBool,
     reset_output: AtomicBool,
+    reset_processing: AtomicBool,
     buffer_ms: u32,
 }
 
@@ -90,6 +104,7 @@ impl AudioControl {
             target: Mutex::new(AudioTarget::default()),
             waiting_for_track: AtomicBool::new(false),
             reset_output: AtomicBool::new(false),
+            reset_processing: AtomicBool::new(false),
             buffer_ms: buffer_ms.clamp(*BUFFER_MS_RANGE.start(), *BUFFER_MS_RANGE.end()),
         })
     }
@@ -105,6 +120,7 @@ impl AudioControl {
                     sink.stop();
                 }
                 self.reset_output.store(true, Ordering::SeqCst);
+                self.reset_processing.store(true, Ordering::SeqCst);
                 // Previous can rewind the current track after interrupting
                 // it. Release that gate, but never close it for a seek:
                 // the decoder is already sending audio from the new position.
@@ -138,6 +154,7 @@ impl AudioControl {
             sink.stop();
         }
         self.reset_output.store(true, Ordering::SeqCst);
+        self.reset_processing.store(true, Ordering::SeqCst);
     }
 
     /// Opens the write gate once librespot has left the old decoder behind.
@@ -152,6 +169,12 @@ impl AudioControl {
 
     fn waiting_for_track(&self) -> bool {
         self.waiting_for_track.load(Ordering::SeqCst)
+    }
+
+    /// The processing wrapper owns a separate reset from the output queue.
+    /// Keep it pending while old decoder packets are still being discarded.
+    pub(crate) fn take_processing_reset(&self) -> bool {
+        !self.waiting_for_track() && self.reset_processing.swap(false, Ordering::SeqCst)
     }
 
     fn take_reset(&self) -> bool {
@@ -170,6 +193,9 @@ impl AudioControl {
 struct Queued {
     appended: AtomicU64,
     consumed: AtomicU64,
+    /// While `write` waits for room, the queued level at or below which it
+    /// is woken; zero while nothing waits.
+    wake_at: AtomicU64,
 }
 
 impl Queued {
@@ -177,6 +203,7 @@ impl Queued {
         Arc::new(Self {
             appended: AtomicU64::new(0),
             consumed: AtomicU64::new(0),
+            wake_at: AtomicU64::new(0),
         })
     }
 
@@ -185,6 +212,36 @@ impl Queued {
         self.appended
             .load(Ordering::Relaxed)
             .saturating_sub(self.consumed.load(Ordering::Relaxed))
+    }
+
+    /// Sleeps the writer until rodio has played `refill` frames of what is
+    /// queued, or `QUEUE_WAIT` has passed.
+    fn wait_for_room(&self, refill: u64) {
+        let wake_at = self.frames().saturating_sub(refill).max(1);
+        self.wake_at.store(wake_at, Ordering::Relaxed);
+        // Pairs with the fence in `drained`: either the chunk that reaches
+        // the level sees it, or this sees that chunk already gone.
+        fence(Ordering::SeqCst);
+        if self.frames() > wake_at {
+            thread::park_timeout(QUEUE_WAIT);
+        }
+        self.wake_at.store(0, Ordering::Relaxed);
+    }
+
+    /// rodio has finished with a chunk: wakes `writer` once the queue has
+    /// drained to the level it waits for, and only then.
+    fn drained(&self, writer: &thread::Thread) {
+        fence(Ordering::SeqCst);
+        let wake_at = self.wake_at.load(Ordering::Relaxed);
+        if wake_at != 0
+            && self.frames() <= wake_at
+            && self
+                .wake_at
+                .compare_exchange(wake_at, 0, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            writer.unpark();
+        }
     }
 }
 
@@ -300,6 +357,9 @@ struct TransitionSource {
     remaining: u32,
     channel: usize,
     gain: f32,
+    /// The thread that queued this chunk, which may be waiting in `write`
+    /// for room.
+    writer: thread::Thread,
 }
 
 impl TransitionSource {
@@ -318,6 +378,7 @@ impl TransitionSource {
             remaining: frames,
             channel: 0,
             gain: 1.0,
+            writer: thread::current(),
         }
     }
 }
@@ -326,10 +387,14 @@ impl Drop for TransitionSource {
     /// rodio drops whole sources on `stop`, which every track change does, so
     /// a chunk can end without being played. Settling up here is what stops
     /// the count drifting away from the queue it is meant to describe.
+    ///
+    /// rodio drops a chunk once it has taken it out of the sink's count, so
+    /// this is also where a writer waiting for room learns of it.
     fn drop(&mut self) {
         self.queued
             .consumed
             .fetch_add(u64::from(self.remaining), Ordering::Relaxed);
+        self.queued.drained(&self.writer);
     }
 }
 
@@ -389,6 +454,7 @@ pub struct RodioSink {
 
 struct Output {
     device: fastframe_audio::Output<MixerRender>,
+    volume: Arc<AtomicU32>,
     /// Where a mixer made for a new stream format waits for this thread.
     made: MixerSlot,
     mixer: rodio::mixer::Mixer,
@@ -432,8 +498,9 @@ impl Output {
     }
 
     /// Has the device ask for sound, reopening it if it failed, moved to a
-    /// new default output, or was let go after a long pause. Returns whether
-    /// the queue was replaced, which needs the volume set again.
+    /// new default output, stopped playing, or was let go after a long
+    /// pause. Returns whether the queue was replaced, which needs the volume
+    /// set again.
     fn run(&mut self, control: &AudioControl) -> Result<bool, OpenError> {
         self.device.resume();
         for error in self.device.take_errors() {
@@ -449,7 +516,16 @@ impl Output {
                 sample_rate,
                 reason,
                 ..
-            } => log::info!("audio output reopened ({reason:?}): {device} at {sample_rate} Hz"),
+            } => match reason {
+                // A stream can stop asking for sound without reporting an
+                // error, and then nothing would ever make room (#731).
+                Reason::Stalled => log::warn!(
+                    "the audio output stopped playing; opened it again: {device} at {sample_rate} Hz"
+                ),
+                Reason::Failed | Reason::DefaultChanged | Reason::Resumed => {
+                    log::info!("audio output reopened ({reason:?}): {device} at {sample_rate} Hz")
+                }
+            },
             Maintained::Failed(error) => return Err(error.into()),
             Maintained::Unchanged | Maintained::Released => {}
         }
@@ -482,6 +558,34 @@ type MadeMixer = (rodio::mixer::Mixer, u32);
 
 type MixerSlot = Arc<Mutex<Option<MadeMixer>>>;
 
+/// A linear gain ramp, shared by every channel of an output frame.
+#[derive(Default)]
+struct VolumeRamp {
+    current: f32,
+    target: f32,
+    remaining: u32,
+    sample_rate: u32,
+}
+
+impl VolumeRamp {
+    fn next_gain(&mut self, target: f32, sample_rate: u32) -> f32 {
+        if target != self.target || sample_rate != self.sample_rate {
+            self.target = target;
+            self.sample_rate = sample_rate;
+            self.remaining = fade_frames(sample_rate, VOLUME_RAMP);
+        }
+        let gain = self.current;
+        if self.remaining > 0 {
+            self.current += (self.target - self.current) / self.remaining as f32;
+            self.remaining -= 1;
+            if self.remaining == 0 {
+                self.current = self.target;
+            }
+        }
+        gain
+    }
+}
+
 /// Fills the device from rodio's mixer, or with silence before there is one.
 ///
 /// fastframe-audio configures it on the sink's thread whenever it opens a
@@ -489,6 +593,8 @@ type MixerSlot = Arc<Mutex<Option<MadeMixer>>>;
 /// reopen on another device carries on from the same sample; another rate or
 /// channel count gets a new mixer, which waits in `made` for the sink.
 struct MixerRender {
+    volume: Arc<AtomicU32>,
+    ramp: VolumeRamp,
     source: Option<rodio::mixer::MixerSource>,
     format: (u32, u16),
     made: MixerSlot,
@@ -511,8 +617,12 @@ impl Render for MixerRender {
     fn render(&mut self, out: &mut [f32]) {
         match &mut self.source {
             Some(source) => {
-                for sample in out {
-                    *sample = source.next().unwrap_or(0.0);
+                let target = f32::from_bits(self.volume.load(Ordering::Relaxed));
+                for frame in out.chunks_mut(usize::from(self.format.1).max(1)) {
+                    let gain = self.ramp.next_gain(target, self.format.0);
+                    for sample in frame {
+                        *sample = source.next().unwrap_or(0.0) * gain;
+                    }
                 }
             }
             None => out.fill(0.0),
@@ -545,7 +655,7 @@ impl RodioSink {
         if let Some(output) = &self.output
             && factor != self.applied_volume
         {
-            output.sink.set_volume(factor);
+            output.volume.store(factor.to_bits(), Ordering::Relaxed);
             self.applied_volume = factor;
         }
     }
@@ -610,7 +720,7 @@ impl Sink for RodioSink {
         if let Some(output) = &mut self.output {
             // The drain below plays the queue out, so the ramp is cut to
             // what is in it. During steady playback that is the whole
-            // 250 ms; just after a seek or a track change it is whatever has
+            // 50 ms; just after a seek or a track change it is whatever has
             // been decoded since.
             output.transport.fade_out_over(output.queued.frames());
             let deadline = Instant::now() + DRAIN_TIMEOUT;
@@ -698,15 +808,32 @@ impl Sink for RodioSink {
         output.fed = true;
         output.last_write = Some(now);
         // Let rodio drain a little; without this the whole track would be
-        // decoded into memory at once.
+        // decoded into memory at once. A full queue sleeps until rodio has
+        // played `REFILL` of it, then is topped up in one go.
+        let refill = u64::from(output.sample_rate) * REFILL.as_millis() as u64 / 1_000;
         while output.sink.len() > QUEUE_LIMIT {
-            if output.failed() {
-                let message = "The audio output stopped working".to_string();
-                (self.on_error)(message.clone());
-                return Err(SinkError::OnWrite(message));
+            // Headphones that connect, a new default output, a device that
+            // went away or a stream that stopped asking for sound: the
+            // output moves to the one to use now and the music carries on.
+            // Only an output that will not open stops it.
+            match output.run(&self.control) {
+                Ok(replaced) if !output.failed() => {
+                    if replaced {
+                        self.applied_volume = -1.0;
+                    }
+                }
+                Ok(_) | Err(_) => {
+                    let message = "The audio output stopped working".to_string();
+                    (self.on_error)(message.clone());
+                    return Err(SinkError::OnWrite(message));
+                }
             }
-            thread::sleep(Duration::from_millis(10));
+            if output.sink.len() <= QUEUE_LIMIT {
+                break;
+            }
+            output.queued.wait_for_room(refill);
         }
+        self.apply_volume();
         Ok(())
     }
 }
@@ -776,7 +903,10 @@ fn open_output(
     control: &AudioControl,
 ) -> Result<Output, OpenError> {
     let made = MixerSlot::default();
+    let volume = Arc::new(AtomicU32::new(0.0f32.to_bits()));
     let render = MixerRender {
+        volume: Arc::clone(&volume),
+        ramp: VolumeRamp::default(),
         source: None,
         format: (0, 0),
         made: Arc::clone(&made),
@@ -791,6 +921,7 @@ fn open_output(
         .ok_or(OpenError::NoDevice)?;
     let mut output = Output {
         device,
+        volume,
         made,
         sink: Arc::new(rodio::Sink::connect_new(&mixer)),
         mixer: mixer.clone(),
@@ -811,6 +942,89 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
+    #[test]
+    fn volume_changes_take_thirty_ms_at_each_output_rate() {
+        for rate in [44_100, 48_000, 96_000] {
+            let frames = rate * 30 / 1_000;
+            let mut ramp = VolumeRamp::default();
+            for target in [1.0, 0.25, 0.0, 0.8] {
+                let start = ramp.current;
+                for frame in 0..frames {
+                    let gain = ramp.next_gain(target, rate);
+                    let expected = start + (target - start) * frame as f32 / frames as f32;
+                    assert!((gain - expected).abs() < 0.0001);
+                }
+                assert_eq!(ramp.next_gain(target, rate), target);
+                assert_eq!(ramp.remaining, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn retargeting_volume_continues_from_the_current_gain() {
+        let mut ramp = VolumeRamp::default();
+        for _ in 0..480 {
+            ramp.next_gain(1.0, 48_000);
+        }
+        let current = ramp.current;
+        assert!(current > 0.0 && current < 1.0);
+        assert_eq!(ramp.next_gain(0.0, 48_000), current);
+        for _ in 1..1440 {
+            ramp.next_gain(0.0, 48_000);
+        }
+        assert_eq!(ramp.next_gain(0.0, 48_000), 0.0);
+    }
+
+    #[test]
+    fn rendered_volume_is_stereo_linked_and_spans_callbacks() {
+        let volume = Arc::new(AtomicU32::new(1.0f32.to_bits()));
+        let made = MixerSlot::default();
+        let mut render = MixerRender {
+            volume: Arc::clone(&volume),
+            ramp: VolumeRamp::default(),
+            source: None,
+            format: (0, 0),
+            made: Arc::clone(&made),
+        };
+        render.configure(48_000, 2);
+        let (mixer, _) = made.lock().unwrap().take().unwrap();
+        mixer.add(rodio::buffer::SamplesBuffer::new(
+            2,
+            48_000,
+            vec![1.0; 10_000],
+        ));
+        let mut rising = Vec::new();
+        for _ in 0..6 {
+            let mut block = [0.0; 480];
+            render.render(&mut block);
+            rising.extend(block);
+        }
+        assert_eq!(rising[0], 0.0);
+        assert!(rising.windows(2).all(|pair| pair[0] <= pair[1]));
+        assert!(
+            rising
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .all(|pair| pair[0] == pair[1])
+        );
+        let mut settled = [0.0; 2];
+        render.render(&mut settled);
+        assert_eq!(settled, [1.0; 2]);
+        volume.store(0.0f32.to_bits(), Ordering::Relaxed);
+        let mut falling = vec![0.0; 2882];
+        render.render(&mut falling);
+        assert_eq!(falling[0], 1.0);
+        assert_eq!(&falling[2880..], &[0.0; 2]);
+        assert!(falling.windows(2).all(|pair| pair[0] >= pair[1]));
+        assert!(
+            falling
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .all(|pair| pair[0] == pair[1])
+        );
+    }
     /// The buffer setting reaches the device on Windows only (#88), and a
     /// settings file with a wild number in it still opens a stream: the
     /// range is the range whoever wrote the file thought of.
@@ -850,6 +1064,8 @@ mod tests {
     fn only_a_new_format_makes_a_new_mixer() {
         let made = MixerSlot::default();
         let mut render = MixerRender {
+            volume: Arc::new(AtomicU32::new(1.0f32.to_bits())),
+            ramp: VolumeRamp::default(),
             source: None,
             format: (0, 0),
             made: Arc::clone(&made),
@@ -1103,7 +1319,7 @@ mod tests {
             librespot_core::SpotifyUri::from_uri("spotify:track:14XWXWv5FoCbFzLksawpEe").unwrap();
         let item = AudioItem {
             track_id: track_id.clone(),
-            uri: track_id.to_uri().unwrap(),
+            uri: track_id.to_uri(),
             files: Default::default(),
             name: "Next song".into(),
             covers: vec![],
@@ -1256,7 +1472,7 @@ mod tests {
 
     #[test]
     fn a_short_queue_still_gets_a_whole_ramp() {
-        let left = 60;
+        let left = 20;
         assert!(left < fade_frames(RATE, TRANSPORT_FADE));
 
         let transport = Envelope::open(RATE, TRANSPORT_FADE);
@@ -1293,5 +1509,46 @@ mod tests {
 
         drop(chunk(40, &interrupt, &transport, &queued));
         assert_eq!(queued.frames(), 0);
+    }
+
+    /// A writer waiting for room sleeps through the chunks that leave the
+    /// queue above its level, and the one that reaches it wakes the writer,
+    /// once. Polling instead woke the decoder thread every 10 ms.
+    #[test]
+    fn a_waiting_writer_wakes_once_the_queue_has_drained_enough() {
+        let queued = Queued::new();
+        let (interrupt, transport) = wide_open();
+        let mut chunks: Vec<_> = (0..4)
+            .map(|_| chunk(10, &interrupt, &transport, &queued))
+            .collect();
+        queued.wake_at.store(20, Ordering::SeqCst);
+
+        drop(chunks.remove(0));
+        assert_eq!(queued.frames(), 30);
+        assert_eq!(queued.wake_at.load(Ordering::SeqCst), 20, "still asleep");
+
+        drop(chunks.remove(0));
+        assert_eq!(queued.wake_at.load(Ordering::SeqCst), 0, "woken, once");
+        // The chunks were queued from this thread, so the wake is its own:
+        // the token is waiting, and parking returns at once.
+        let started = Instant::now();
+        thread::park_timeout(Duration::from_secs(5));
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        drop(chunks);
+        assert_eq!(queued.frames(), 0);
+    }
+
+    /// A stream that has stopped consuming finishes no chunk, so the wait
+    /// gives up by itself and `write` gets to have the device maintained,
+    /// which reopens a stream that stopped playing (Reason::Stalled).
+    #[test]
+    fn waiting_for_room_gives_up_when_nothing_plays() {
+        let queued = Queued::new();
+        queued.appended.store(1_000, Ordering::SeqCst);
+        let started = Instant::now();
+        queued.wait_for_room(100);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(queued.wake_at.load(Ordering::SeqCst), 0);
     }
 }

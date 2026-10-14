@@ -288,10 +288,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             if row_matches(&needle, &format!("{sign_out} {account}"), "") {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 14.0;
-                    let avatar = app
-                        .user
-                        .as_ref()
-                        .and_then(|user| pick_image(&user.images, 64).map(str::to_string));
+                    let avatar = app.user.as_ref().and_then(|user| {
+                        pick_image(&user.images, app.art_px(56.0)).map(str::to_string)
+                    });
                     widgets::cover(ui, &palette, avatar.as_deref(), 56.0, 28.0, Icon::User);
                     ui.vertical(|ui| {
                         let name = app
@@ -421,6 +420,14 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         crate::backend::LocalPlayback::Connecting => (
             pgettext(locale, "playback status", "Connecting"),
             gettext(locale, "Connecting to Spotify…"),
+            None,
+        ),
+        crate::backend::LocalPlayback::WaitingForNetwork => (
+            pgettext(locale, "playback status", "Waiting for network"),
+            gettext(
+                locale,
+                "Waiting for network connectivity to resume playback.",
+            ),
             None,
         ),
         crate::backend::LocalPlayback::Failed(message) => (
@@ -938,7 +945,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let tracklist_compact = gettext(locale, "Compact track list");
     let middle_click = gettext(locale, "Middle-click autoscroll");
     let custom_titlebar = gettext(locale, "Custom title bar");
+    let show_custom_titlebar = cfg!(target_os = "linux") || app.windows_controls_visible();
     let player_bar_vis = gettext(locale, "Player bar visualizer");
+    let player_bar_vis_click = gettext(locale, "Click player bar to change visualizer");
     let appearance_rows = [
         RowText::new(theme_title.clone(), {
             let detail = theme::catalog_detail(
@@ -1005,16 +1014,20 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             custom_titlebar.clone(),
             gettext(
                 locale,
-                "Draw Spotifast's own title bar and window buttons instead of the standard Windows ones.",
+                "Draw Spotifast's own title bar and window buttons instead of the desktop's.",
             ),
         )
-        .when(app.windows_controls_visible()),
+        .when(show_custom_titlebar),
         RowText::new(
             player_bar_vis.clone(),
             gettext(
                 locale,
                 "Show the song moving behind the player bar's controls while it plays here.",
             ),
+        ),
+        RowText::new(
+            player_bar_vis_click.clone(),
+            gettext(locale, "Allow clicks on empty player bar space to cycle the visualizer."),
         ),
     ];
     if section_matches(&needle, &appearance, &appearance_rows) {
@@ -1205,6 +1218,25 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 &palette,
                 &needle,
                 &appearance,
+                &appearance_rows[9],
+                |ui| {
+                    if widgets::switch(
+                        ui,
+                        &palette,
+                        &player_bar_vis_click,
+                        &mut app.settings.player_bar_vis_click,
+                    )
+                    .changed()
+                    {
+                        changed = true;
+                    }
+                },
+            );
+            filtered_row(
+                ui,
+                &palette,
+                &needle,
+                &appearance,
                 &appearance_rows[3],
                 |ui| {
                     if widgets::switch(
@@ -1289,7 +1321,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     },
                 );
             }
-            if app.windows_controls_visible() {
+            if show_custom_titlebar {
                 filtered_row(
                     ui,
                     &palette,

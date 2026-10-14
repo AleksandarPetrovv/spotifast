@@ -1,15 +1,29 @@
 ---
 title: Make It Even Faster
-description: "Reduce loading delays with your own Spotify connection."
+description: "Scrolling performance and reducing loading delays with your own Spotify connection."
 nav_order: 6
 ---
+
+## Scrolling and large libraries
+
+The sidebar is drawn alongside every page, so its sorting work can affect
+scrolling elsewhere in the window. Library ordering now looks up each row's
+position once per sort instead of repeatedly searching the full saved order.
+This reduces the work each frame needs for large libraries while preserving
+your chosen sort, pins, and folders.
+
+The main window draws as needed and uses the platform's frame pacing. The
+MilkDrop frame-rate setting applies to its separate visualizer window.
 
 ## API rate limits
 
 Spotify limits how often apps can ask for information. Spotifast normally
 shares this allowance with other listeners and several other music players.
 When that shared connection is busy, your library and search results can take
-longer to load. The top bar shows a spinner while you wait.
+longer to load. The top bar shows a spinner while you wait; hover over it to
+see whether Spotifast is updating your library, checking for updates, or
+waiting for Spotify. Your playlists and Home show what they showed last time
+until the update arrives.
 
 You can reduce those delays by creating a **personal Spotify app**. This is
 a connection registered to your account on Spotify's developer website.

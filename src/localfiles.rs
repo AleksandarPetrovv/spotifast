@@ -397,7 +397,7 @@ fn save_index(path: &Path, files: &[LocalFile]) -> std::io::Result<()> {
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
     let temporary = path.with_extension("json.tmp");
     std::fs::write(&temporary, text)?;
-    crate::util::replace_file(&temporary, path)
+    std::fs::rename(&temporary, path)
 }
 
 /// Why indexing one file failed.

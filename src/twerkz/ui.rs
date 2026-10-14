@@ -55,7 +55,6 @@ pub struct State {
     next_id: u64,
     last_folder: Option<PathBuf>,
     import: Option<Import>,
-    pub library: super::library::LibraryCache,
     /// The emoji font the next start will use, read once Settings shows it.
     emoji_next: Option<Option<String>>,
     romaji: Option<Romaji>,

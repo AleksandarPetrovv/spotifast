@@ -12,8 +12,8 @@ the top-bar visualiser button, Ctrl+Shift+K, Settings, or the mini player's
   <source src="/assets/images/milkdrop.mp4" type="video/mp4">
 </video>
 
-MilkDrop is included on Linux and macOS, and in the Windows download for
-Intel or AMD PCs. It is not included in the Windows on ARM download.
+MilkDrop is included on Linux, macOS and Windows, on Intel, AMD and ARM
+PCs alike.
 
 ## The window
 
@@ -24,6 +24,11 @@ corner to resize it.
 Like the other visualisers, MilkDrop follows changes you make with the
 equalizer. Turning down the volume does not change the picture, even at zero.
 It reacts only to music playing on this computer.
+
+MilkDrop stops drawing while its window is minimised, and on macOS and Linux
+also while it is covered. While the system saves energy it draws at most 30
+frames a second, and one a second while the display is off or the screen is
+locked.
 
 ## Presets
 

@@ -532,9 +532,16 @@ async fn run(
 }
 
 async fn ask(backend: &Backend, request: ApiRequest) -> ApiResponse {
-    crate::backend::handle(&backend.api, backend.engine.as_deref(), request)
-        .await
-        .0
+    crate::backend::handle(
+        &backend.api,
+        &crate::made_for_you::MadeForYou::new(crate::http::Http::default()),
+        &crate::sonos::Controller::default(),
+        backend.engine.as_deref(),
+        &tokio::sync::Semaphore::new(1),
+        request,
+    )
+    .await
+    .0
 }
 
 /// The songs behind `uri`, and the album or playlist name when it is one.
