@@ -198,7 +198,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let width = ui.available_width();
     let mut window_controls = super::window_controls_reservation(
         ui.ctx(),
-        app.show_queue_panel,
+        app.show_queue_panel || app.show_friends_panel,
         app.show_lyrics_panel,
         width,
     );
@@ -211,8 +211,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     // its empty parts drag the window.
     let inset = theme::titlebar_inset(ui.ctx());
     let content_height = theme::top_bar_height() + inset;
-    if crate::window::custom_titlebar() {
-        super::titlebar_drag(
+    if fastframe_titlebar::enabled() {
+        fastframe_titlebar::drag(
             ui,
             egui::Rect::from_min_size(
                 ui.cursor().min,
@@ -222,7 +222,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     }
     // Balance the visible Windows header, including the gap below the
     // control row.
-    let top_padding = if cfg!(windows) && crate::window::custom_titlebar() {
+    let top_padding = if cfg!(windows) && fastframe_titlebar::enabled() {
         4.0
     } else {
         0.0
@@ -446,23 +446,26 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     .show(|ui| {
                         ui.set_width(200.0);
                         ui.add_space(4.0);
+                        // The plan sits right under the name, as one block:
+                        // a row of its own each would put a control's height
+                        // between them (#1038).
                         ui.horizontal(|ui| {
                             ui.add_space(10.0);
-                            theme::text(ui, &name, theme::semibold(14.0), palette.text);
-                        });
-                        if let Some(product) =
-                            app.user.as_ref().and_then(|user| user.product.clone())
-                        {
-                            ui.horizontal(|ui| {
-                                ui.add_space(10.0);
-                                theme::text(
-                                    ui,
-                                    capitalize(&product),
-                                    theme::regular(12.0),
-                                    palette.secondary,
-                                );
+                            ui.vertical(|ui| {
+                                ui.spacing_mut().item_spacing.y = 2.0;
+                                theme::text(ui, &name, theme::semibold(14.0), palette.text);
+                                if let Some(product) =
+                                    app.user.as_ref().and_then(|user| user.product.clone())
+                                {
+                                    theme::text(
+                                        ui,
+                                        capitalize(&product),
+                                        theme::regular(12.0),
+                                        palette.secondary,
+                                    );
+                                }
                             });
-                        }
+                        });
                         super::widgets::menu_separator(ui, &palette);
                         if super::widgets::menu_item(
                             ui,

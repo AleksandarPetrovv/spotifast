@@ -6,11 +6,13 @@ pub mod artist;
 pub mod collection;
 pub(crate) mod devices;
 mod dialogs;
+pub(crate) mod friends;
 pub mod home;
 mod keys;
 pub mod library;
 pub mod login;
 mod lyrics;
+pub mod new_releases;
 pub mod player_bar;
 mod prerelease;
 pub mod queue;
@@ -47,12 +49,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         login::show(app, ui, connecting);
         update::show(app, ctx);
         toasts(app, ctx, 20.0);
-        window_controls(ui, &app.palette, app.locale);
-        window_resize(ui);
+        caption_buttons(ui, &app.palette, app.locale);
+        fastframe_titlebar::resize(ui);
         return;
     }
-    if titlebar_spans_window(cfg!(target_os = "macos"), crate::window::custom_titlebar()) {
-        titlebar_drag(
+    if titlebar_spans_window(cfg!(target_os = "macos"), fastframe_titlebar::enabled()) {
+        fastframe_titlebar::drag(
             ui,
             Rect::from_min_size(
                 ui.max_rect().min,
@@ -76,17 +78,20 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         if app.show_lyrics_panel {
             lyrics::side_panel(app, ui);
         }
+        if app.show_friends_panel {
+            friends::side_panel(app, ui);
+        }
         central(app, ui);
-        keep_room_for_panels(app, ctx);
     }
+    keep_room_for_panels(app, ctx);
     devices::popup(app, ctx);
     dialogs::show(app, ctx);
     update::show(app, ctx);
     widgets::drag_ghost(ctx, &app.palette, app.locale);
     crate::twerkz::ui::panel(app, ctx);
     toasts(app, ctx, theme::PLAYER_BAR_HEIGHT + 16.0);
-    window_controls(ui, &app.palette, app.locale);
-    window_resize(ui);
+    caption_buttons(ui, &app.palette, app.locale);
+    fastframe_titlebar::resize(ui);
 }
 
 /// The main window's narrowest width with these panels open: their least
@@ -108,14 +113,20 @@ pub(crate) const SIDEBAR_MIN_WIDTH: f32 = 210.0;
 /// so even at its narrowest the page beside the panels keeps the room its
 /// top bar needs (#624), and lower it again once they close. Window managers
 /// that tile ignore the minimum; the panels still give way there.
+///
+/// Full-screen lyrics draw no sidebar or side panel (an open queue becomes a
+/// column inside them), so they ask for no room for them. A screen narrower
+/// than the panels' minimum, such as a portrait monitor, then holds the
+/// full-screen window without a minimum wider than itself (#783).
 fn keep_room_for_panels(app: &App, ctx: &Context) {
     if crate::window::fixed_size() {
         return;
     }
+    let panels = app.lyrics_fullscreen.is_none();
     let width = main_min_width(
         topbar::least_width(ctx),
-        app.settings.sidebar_visible,
-        app.show_queue_panel || app.show_lyrics_panel,
+        panels && app.settings.sidebar_visible,
+        panels && (app.show_queue_panel || app.show_lyrics_panel || app.show_friends_panel),
     )
     .round();
     let id = Id::new("main-min-width");
@@ -156,11 +167,14 @@ pub(crate) fn yielding_panel(
     let (min, max) = range.into_inner();
     let max = max.min(room).max(min);
     let width = chosen.clamp(min, max);
-    // egui remembers the width the panel last drew at, a clamped one too.
-    // Hand it back the chosen width whenever there is room for more.
+    // egui remembers the width the panel last drew at. While nobody drags
+    // its handle, hand it back the chosen width, either way: a resize made
+    // elsewhere (the fullscreen queue column shares the queue width) shows
+    // here too, and the panel never writes a stale width back over it.
     let id = Id::new(id);
-    if let Some(mut state) = egui::containers::panel::PanelState::load(ctx, id)
-        && state.outer_rect.width() + 0.5 < width
+    if !ctx.is_being_dragged(id.with("__resize"))
+        && let Some(mut state) = egui::containers::panel::PanelState::load(ctx, id)
+        && (state.outer_rect.width() - width).abs() > 0.5
     {
         state.outer_rect.set_width(width);
         ctx.data_mut(|data| data.insert_persisted(id, state));
@@ -171,10 +185,15 @@ pub(crate) fn yielding_panel(
     }
 }
 
+/// Whether the person is dragging this panel's resize handle right now.
+pub(crate) fn panel_dragged(ctx: &Context, id: &str) -> bool {
+    ctx.is_being_dragged(Id::new(id).with("__resize"))
+}
+
 /// Whether a panel's new width is one the person chose: it moved while not
 /// held back by the page, or by their own drag.
 pub(crate) fn panel_width_chosen(ctx: &Context, id: &str, fit: &PanelFit) -> bool {
-    !fit.yielding || ctx.is_being_dragged(Id::new(id).with("__resize"))
+    !fit.yielding || panel_dragged(ctx, id)
 }
 
 /// Keeps the most recent loading preview of each metadata type available to
@@ -264,18 +283,21 @@ fn central(app: &mut App, ui: &mut egui::Ui) {
         .frame(Frame::new().fill(palette.window))
         .show(ui, |ui| {
             let rect = ui.max_rect();
-            if let Some(tint) = tint {
-                let strength = if matches!(
-                    app.page(),
-                    Page::Home | Page::Search | Page::Settings | Page::Queue
-                ) {
-                    0.45
-                } else {
-                    0.85
-                };
-                let top = blend(palette.window, tint, strength);
-                let header = Rect::from_min_size(rect.min, vec2(rect.width(), 340.0));
-                widgets::paint_vertical_gradient(ui, header, top, palette.window);
+            let page = app.page().clone();
+            let overview = matches!(
+                page,
+                Page::Home | Page::Search | Page::Settings | Page::Queue
+            );
+            // The wash belongs to the page's hero, so it scrolls away with
+            // it. The page's offset is known once it has been laid out, so
+            // the previous frame's serves.
+            let scrolled_id = Id::new(("page-scrolled", page.encode()));
+            let scrolled = ui
+                .ctx()
+                .data(|data| data.get_temp::<f32>(scrolled_id))
+                .unwrap_or(0.0);
+            if let Some((top, bottom)) = header_wash(&palette, overview, tint) {
+                widgets::paint_vertical_gradient(ui, header_rect(rect, scrolled), top, bottom);
             }
             ui.spacing_mut().item_spacing = vec2(8.0, 6.0);
             // egui fades a scrolled page's edge into the panel's plain
@@ -283,7 +305,15 @@ fn central(app: &mut App, ui: &mut egui::Ui) {
             // page casts a shadow under the header instead.
             ui.spacing_mut().scroll.fade.strength = 0.0;
             topbar::show(app, ui);
-            let page = app.page().clone();
+            // One banner at a time: a song that will not play matters more
+            // than a slow app, which waits its turn.
+            if app.dialog.is_none() && page != Page::Settings {
+                if app.audio_key_banner {
+                    audio_key_banner(app, ui);
+                } else if app.slow_banner {
+                    slow_banner(app, ui);
+                }
+            }
             let scroll = crate::autoscroll::show(
                 ui,
                 egui::ScrollArea::vertical()
@@ -303,6 +333,7 @@ fn central(app: &mut App, ui: &mut egui::Ui) {
                             match page {
                                 Page::Home => home::show(app, ui),
                                 Page::TopSongs => collection::top_songs(app, ui),
+                                Page::NewReleases => new_releases::page(app, ui),
                                 Page::Search => search::show(app, ui),
                                 Page::LikedSongs => collection::liked(app, ui),
                                 Page::LocalFiles => collection::local_files(app, ui),
@@ -318,10 +349,184 @@ fn central(app: &mut App, ui: &mut egui::Ui) {
                                 Page::Settings => settings::show(app, ui),
                             }
                         });
+                    if app.dialog.is_none() && !app.show_devices {
+                        keys::scroll_page(ui);
+                    }
                 },
             );
+            ui.ctx()
+                .data_mut(|data| data.insert_temp(scrolled_id, scroll.state.offset.y));
             header_shadow(ui, scroll.inner_rect, scroll.state.offset.y, palette.dark);
         });
+}
+
+/// Where the "Why?" link of the slow-app banner leads.
+const SLOW_BANNER_GUIDE: &str = "https://spotifast.rocks/troubleshooting/#rate-limits";
+/// Where the "Why?" link of the audio-key banner leads.
+pub const AUDIO_KEY_GUIDE: &str = "https://spotifast.rocks/troubleshooting/#audio-key";
+
+/// A strip under the top bar suggesting a personal app, after Spotify
+/// told the shared app, which only listeners signed in before 0.14.2 still
+/// use, that it sent too many requests. It stays put while the
+/// page scrolls, and goes when it is closed.
+fn slow_banner(app: &mut App, ui: &mut egui::Ui) {
+    use crate::i18n::gettext;
+    let locale = app.locale;
+    banner(
+        app,
+        ui,
+        &gettext(locale, "Spotify is being slow on the shared app."),
+        &gettext(
+            locale,
+            "Spotifast no longer offers the shared app, and Spotify can stop accepting it at any time. Set up your own free Spotify app and you won't have to wait.",
+        ),
+        [
+            (
+                gettext(locale, "Set up personal app"),
+                Action::OpenPersonalAppSetup,
+            ),
+            (
+                // Translators: a button that opens a page explaining why
+                // the banner it sits in appeared.
+                gettext(locale, "Why?"),
+                Action::OpenUrl(SLOW_BANNER_GUIDE.into()),
+            ),
+        ],
+        Action::CloseSlowBanner,
+    );
+}
+
+/// A strip under the top bar after Spotify refused the key that decrypts a
+/// song on this computer, offering another Spotify device, which fetches
+/// its own audio, and the guide's explanation.
+fn audio_key_banner(app: &mut App, ui: &mut egui::Ui) {
+    use crate::i18n::gettext;
+    let locale = app.locale;
+    banner(
+        app,
+        ui,
+        &gettext(
+            locale,
+            "Spotify won't let this computer play this song right now.",
+        ),
+        &gettext(
+            locale,
+            "Spotify refused the key that unlocks the audio. Spotifast can't fix that, but it sometimes clears up on its own. You can still play on your phone or another Spotify device.",
+        ),
+        [
+            (
+                gettext(locale, "Play on another device"),
+                Action::PlayOnAnotherDevice,
+            ),
+            (
+                gettext(locale, "Why?"),
+                Action::OpenUrl(AUDIO_KEY_GUIDE.into()),
+            ),
+        ],
+        Action::CloseAudioKeyBanner,
+    );
+}
+
+/// A notice under the top bar: a bold line, a sentence or two, a main and
+/// a secondary button, and a close button.
+fn banner(
+    app: &mut App,
+    ui: &mut egui::Ui,
+    title: &str,
+    text: &str,
+    [(primary, primary_action), (secondary, secondary_action)]: [(std::borrow::Cow<'static, str>, Action);
+        2],
+    close: Action,
+) {
+    use crate::i18n::gettext;
+    let palette = app.palette;
+    let locale = app.locale;
+    Frame::new()
+        .outer_margin(Margin {
+            left: widgets::PAGE_PADDING as i8,
+            right: widgets::PAGE_PADDING as i8,
+            top: 0,
+            bottom: 8,
+        })
+        .fill(palette.surface)
+        .stroke(Stroke::new(1.0, palette.outline))
+        .corner_radius(CornerRadius::same(theme::RADIUS))
+        .inner_margin(Margin {
+            left: 16,
+            right: 6,
+            top: 12,
+            bottom: 12,
+        })
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+                if theme::icon_button(
+                    ui,
+                    Icon::X,
+                    16.0,
+                    palette.secondary,
+                    palette.text,
+                    &gettext(locale, "Close banner"),
+                )
+                .clicked()
+                {
+                    app.actions.push(close);
+                }
+                ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                    ui.spacing_mut().item_spacing = vec2(8.0, 4.0);
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(title)
+                                .font(theme::bold(14.0))
+                                .color(palette.text),
+                        )
+                        .wrap(),
+                    );
+                    ui.add(
+                        egui::Label::new(
+                            egui::RichText::new(text)
+                                .font(theme::regular(13.0))
+                                .color(palette.secondary),
+                        )
+                        .wrap(),
+                    );
+                    ui.add_space(6.0);
+                    ui.horizontal_wrapped(|ui| {
+                        if theme::pill_button(ui, &palette, &primary, true).clicked() {
+                            app.actions.push(primary_action);
+                        }
+                        if theme::pill_button(ui, &palette, &secondary, false).clicked() {
+                            app.actions.push(secondary_action);
+                        }
+                    });
+                });
+            });
+        });
+}
+
+/// The gradient behind a page's header, top to bottom: the art's colour
+/// blended into the window, stronger on a cover's own page than on an
+/// overview, or else the palette's `tint` fading out, whose alpha is its
+/// strength. `None` leaves the plain window.
+fn header_wash(
+    palette: &theme::Palette,
+    overview: bool,
+    art: Option<Color32>,
+) -> Option<(Color32, Color32)> {
+    if let Some(art) = art {
+        let strength = if overview { 0.45 } else { 0.85 };
+        return Some((blend(palette.window, art, strength), palette.window));
+    }
+    (palette.tint.a() > 0).then_some((palette.tint, Color32::TRANSPARENT))
+}
+
+/// Where the header's wash is painted: the top of the panel, moved up by
+/// how far the page has scrolled, so it leaves with the hero.
+fn header_rect(panel: Rect, scrolled: f32) -> Rect {
+    Rect::from_min_size(
+        panel.min - vec2(0.0, scrolled.max(0.0)),
+        vec2(panel.width(), 340.0),
+    )
 }
 
 /// The shadow the header casts on a page scrolled under it, deepening over
@@ -342,55 +547,15 @@ fn header_shadow(ui: &egui::Ui, page: Rect, scrolled: f32, dark: bool) {
     );
 }
 
-/// Makes `rect` drag the borderless window. Register it before child widgets so
-/// they keep their clicks.
-pub fn titlebar_drag(ui: &mut egui::Ui, rect: egui::Rect) {
-    let fullscreen = ui
-        .ctx()
-        .input(|input| input.viewport().fullscreen.unwrap_or(false));
-    if fullscreen || !(cfg!(target_os = "macos") || crate::window::custom_titlebar()) {
-        return;
-    }
-    let response = ui.interact(
-        rect,
-        ui.id().with("titlebar-drag"),
-        egui::Sense::click_and_drag(),
-    );
-    if crate::window::custom_titlebar() && response.double_clicked() {
-        let maximized = ui
-            .ctx()
-            .input(|input| input.viewport().maximized.unwrap_or(false));
-        ui.ctx()
-            .send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
-    } else if (crate::window::custom_titlebar() && response.drag_started())
-        || (cfg!(target_os = "macos")
-            && response.is_pointer_button_down_on()
-            && ui.input(|input| input.pointer.primary_pressed())
-            && crate::window::macos_titlebar_should_drag())
-    {
-        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
-    }
-}
-
 /// Without a native title bar, the top of every panel drags the window, not
 /// only the page's top bar.
 const fn titlebar_spans_window(on_macos: bool, custom_titlebar: bool) -> bool {
     on_macos || custom_titlebar
 }
 
-const WINDOW_RESIZE_BORDER: f32 = 5.0;
-#[cfg(target_os = "linux")]
-const LINUX_CONTROLS_MARGIN: f32 = 14.0;
-const WINDOW_RESIZE_CORNER: f32 = 10.0;
-const WINDOWS_WINDOW_CONTROLS_WIDTH: f32 = 3.0 * 36.0 + WINDOW_RESIZE_BORDER;
-/// The caption row: the custom Windows header's height, or Linux's buttons
-/// with their margin.
-#[cfg(not(target_os = "linux"))]
-const WINDOWS_WINDOW_CONTROLS_HEIGHT: f32 = theme::CUSTOM_TOP_BAR_HEIGHT;
-#[cfg(target_os = "linux")]
-const WINDOWS_WINDOW_CONTROLS_HEIGHT: f32 = 36.0 + WINDOW_RESIZE_BORDER;
-// The 760-point minimum with the default 250-point sidebar leaves 510 points.
-const WINDOWS_MIN_INLINE_TOPBAR_WIDTH: f32 = 510.0 + WINDOWS_WINDOW_CONTROLS_WIDTH;
+/// The room the top bar's own controls need beside the caption buttons: the
+/// 760-point minimum with the default 250-point sidebar leaves 510 points.
+const TOPBAR_MIN_CONTENT: f32 = 510.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct WindowControlsReservation {
@@ -400,22 +565,14 @@ pub(super) struct WindowControlsReservation {
     pub lyrics_top: f32,
 }
 
-const fn windows_chrome_visible(on_windows: bool, fullscreen: bool) -> bool {
-    on_windows && !fullscreen
-}
-
-fn windows_chrome_visible_here(ctx: &egui::Context) -> bool {
-    let fullscreen = ctx.input(|input| input.viewport().fullscreen.unwrap_or(false));
-    windows_chrome_visible(crate::window::custom_titlebar(), fullscreen)
-}
-
-const fn controls_reservation(
-    on_windows: bool,
-    fullscreen: bool,
+/// The caption buttons on the right belong to the outermost header: the
+/// queue's or the lyrics' when either panel is open, otherwise the top bar,
+/// beside its controls or above them when the page is too narrow.
+fn controls_reservation(
+    footprint: fastframe_titlebar::Footprint,
     queue: bool,
     lyrics: bool,
     topbar_width: f32,
-    controls_width: f32,
 ) -> WindowControlsReservation {
     let mut space = WindowControlsReservation {
         topbar_width: 0.0,
@@ -423,30 +580,32 @@ const fn controls_reservation(
         queue_top: 0.0,
         lyrics_top: 0.0,
     };
-    if windows_chrome_visible(on_windows, fullscreen) && controls_width > 0.0 {
-        if queue {
-            space.queue_top = WINDOWS_WINDOW_CONTROLS_HEIGHT;
-        } else if lyrics {
-            space.lyrics_top = WINDOWS_WINDOW_CONTROLS_HEIGHT;
-        } else if topbar_width
-            < WINDOWS_MIN_INLINE_TOPBAR_WIDTH - WINDOWS_WINDOW_CONTROLS_WIDTH + controls_width
-        {
-            space.topbar_top = WINDOWS_WINDOW_CONTROLS_HEIGHT;
-        } else {
-            space.topbar_width = controls_width;
-        }
+    if footprint.right <= 0.0 {
+        return space;
+    }
+    if queue {
+        space.queue_top = footprint.height;
+    } else if lyrics {
+        space.lyrics_top = footprint.height;
+    } else {
+        let reserve = footprint.reserve(topbar_width, TOPBAR_MIN_CONTENT);
+        space.topbar_width = reserve.inline_width;
+        space.topbar_top = reserve.push_down;
     }
     space
 }
 
 /// Left-hand Linux controls sit above the sidebar's navigation rows.
 pub(super) fn linux_left_controls_inset(ctx: &egui::Context) -> f32 {
-    #[cfg(target_os = "linux")]
-    if windows_chrome_visible_here(ctx) && !crate::window::linux_window_controls().left.is_empty() {
-        return WINDOWS_WINDOW_CONTROLS_HEIGHT;
+    if !cfg!(target_os = "linux") {
+        return 0.0;
     }
-    let _ = ctx;
-    0.0
+    let footprint = fastframe_titlebar::footprint(ctx, theme::CUSTOM_TOP_BAR_HEIGHT);
+    if footprint.left > 0.0 {
+        footprint.height
+    } else {
+        0.0
+    }
 }
 
 pub(super) fn window_controls_reservation(
@@ -455,249 +614,40 @@ pub(super) fn window_controls_reservation(
     lyrics: bool,
     topbar_width: f32,
 ) -> WindowControlsReservation {
-    let fullscreen = ctx.input(|input| input.viewport().fullscreen.unwrap_or(false));
-    #[cfg(target_os = "linux")]
-    let width = crate::window::linux_window_controls().right.len() as f32 * 36.0
-        + if crate::window::linux_window_controls().right.is_empty() {
-            0.0
-        } else {
-            LINUX_CONTROLS_MARGIN
-        };
-    #[cfg(not(target_os = "linux"))]
-    let width = WINDOWS_WINDOW_CONTROLS_WIDTH;
     controls_reservation(
-        crate::window::custom_titlebar(),
-        fullscreen,
+        fastframe_titlebar::footprint(ctx, theme::CUSTOM_TOP_BAR_HEIGHT),
         queue,
         lyrics,
         topbar_width,
-        width,
     )
 }
 
-/// Draws caption controls over the outermost header on both Windows and Linux.
-pub fn window_controls(ui: &mut egui::Ui, palette: &theme::Palette, locale: crate::i18n::Locale) {
+/// Draws the caption buttons over the window's top corners in the palette's
+/// colours: Windows' glyphs in the secondary text colour, GNOME's round
+/// buttons in the text colour on the hover surface.
+fn caption_buttons(ui: &mut egui::Ui, palette: &theme::Palette, locale: crate::i18n::Locale) {
     use crate::i18n::gettext;
-    use crate::window::WindowButton;
-    if !windows_chrome_visible_here(ui.ctx()) {
-        return;
-    }
-    let maximized = ui
-        .ctx()
-        .input(|input| input.viewport().maximized.unwrap_or(false));
-    #[cfg(target_os = "linux")]
-    let groups = {
-        let controls = crate::window::linux_window_controls();
-        [
-            (false, controls.left.as_slice()),
-            (true, controls.right.as_slice()),
-        ]
-    };
-    #[cfg(not(target_os = "linux"))]
-    let groups = [(
-        true,
-        [
-            crate::window::WindowButton::Minimize,
-            crate::window::WindowButton::Maximize,
-            crate::window::WindowButton::Close,
-        ]
-        .as_slice(),
-    )];
-    // Windows centres its 36-point buttons in the custom header's height.
-    let (margin, top, spacing) = if cfg!(target_os = "linux") {
-        (14.0, 14.0, 8.0)
-    } else {
-        (
-            WINDOW_RESIZE_BORDER,
-            (WINDOWS_WINDOW_CONTROLS_HEIGHT - 36.0) / 2.0 + 2.0,
-            0.0,
-        )
-    };
-    for (right, buttons) in groups {
-        if buttons.is_empty() {
-            continue;
-        }
-        egui::Area::new(egui::Id::new(if right {
-            "windows-window-controls"
+    let style = fastframe_titlebar::Style {
+        icon: if cfg!(target_os = "linux") {
+            palette.text
         } else {
-            "window-controls-left"
-        }))
-        .anchor(
-            if right {
-                Align2::RIGHT_TOP
-            } else {
-                Align2::LEFT_TOP
-            },
-            vec2(if right { -margin } else { margin }, top),
-        )
-        .order(egui::Order::Foreground)
-        .show(ui.ctx(), |ui| {
-            ui.spacing_mut().item_spacing.x = spacing;
-            // The app's ordinary buttons have wide text padding. Caption icons
-            // need equal padding so a 28-point button stays circular.
-            #[cfg(target_os = "linux")]
-            {
-                ui.spacing_mut().button_padding = vec2(6.0, 6.0);
-            }
-            ui.horizontal(|ui| {
-                for &button in buttons {
-                    let (icon, tooltip, command, _linux_icon) = match button {
-                        WindowButton::Minimize => (
-                            Icon::Minus,
-                            gettext(locale, "Minimize"),
-                            egui::ViewportCommand::Minimized(true),
-                            (0, "bytes://linux-window-minimize.svg"),
-                        ),
-                        WindowButton::Maximize => (
-                            if maximized { Icon::Copy } else { Icon::Square },
-                            if maximized {
-                                gettext(locale, "Restore")
-                            } else {
-                                gettext(locale, "Maximize")
-                            },
-                            egui::ViewportCommand::Maximized(!maximized),
-                            if maximized {
-                                (3, "bytes://linux-window-restore.svg")
-                            } else {
-                                (1, "bytes://linux-window-maximize.svg")
-                            },
-                        ),
-                        WindowButton::Close => (
-                            Icon::X,
-                            gettext(locale, "Close"),
-                            egui::ViewportCommand::Close,
-                            (2, "bytes://linux-window-close.svg"),
-                        ),
-                    };
-                    #[cfg(target_os = "linux")]
-                    let image = if let Some(bytes) = crate::window::LINUX_ICONS
-                        .get()
-                        .and_then(|icons| icons[_linux_icon.0].as_deref())
-                    {
-                        egui::Image::from_bytes(_linux_icon.1, bytes)
-                            .fit_to_exact_size(vec2(16.0, 16.0))
-                            .tint(palette.text)
-                    } else {
-                        icon.image(palette.text, 16.0)
-                    }
-                    .alt_text(tooltip.as_ref());
-                    #[cfg(not(target_os = "linux"))]
-                    let image = icon
-                        .image(palette.secondary, 14.0)
-                        .alt_text(tooltip.as_ref());
-                    #[cfg(not(target_os = "linux"))]
-                    let close = matches!(button, WindowButton::Close);
-                    let button = egui::Button::image(image).frame_when_inactive(false);
-                    #[cfg(target_os = "linux")]
-                    let response = ui.add_sized(
-                        egui::Vec2::splat(28.0),
-                        button
-                            .frame_when_inactive(true)
-                            .fill(palette.surface_hover)
-                            .corner_radius(egui::CornerRadius::same(14)),
-                    );
-                    #[cfg(not(target_os = "linux"))]
-                    let response = ui
-                        .scope(|ui| {
-                            caption_feedback(ui, close);
-                            ui.add_sized(egui::Vec2::splat(36.0), button)
-                        })
-                        .inner;
-                    let response = response.on_hover_text(tooltip.as_ref());
-                    if response.clicked() {
-                        ui.ctx().send_viewport_cmd(command);
-                    }
-                }
-            });
-        });
-    }
-}
-
-/// Windows' caption feedback: a light wash over Minimize and Maximize while
-/// hovered, red under Close, each dimmer while pressed.
-#[cfg(not(target_os = "linux"))]
-fn caption_feedback(ui: &mut egui::Ui, close: bool) {
-    let (hover, pressed) = if close {
-        (
-            egui::Color32::from_rgb(232, 17, 35),
-            egui::Color32::from_rgb(174, 13, 26),
-        )
-    } else {
-        (
-            egui::Color32::from_white_alpha(55),
-            egui::Color32::from_white_alpha(32),
-        )
+            palette.secondary
+        },
+        button: palette.surface_hover,
+        header_height: theme::CUSTOM_TOP_BAR_HEIGHT,
     };
-    let visuals = &mut ui.style_mut().visuals.widgets;
-    visuals.hovered.bg_fill = hover;
-    visuals.hovered.weak_bg_fill = hover;
-    visuals.hovered.bg_stroke = egui::Stroke::NONE;
-    visuals.active.bg_fill = pressed;
-    visuals.active.weak_bg_fill = pressed;
-    visuals.active.bg_stroke = egui::Stroke::NONE;
-}
-
-fn window_resize(ui: &mut egui::Ui) {
-    let (fullscreen, maximized) = ui.ctx().input(|input| {
-        (
-            input.viewport().fullscreen.unwrap_or(false),
-            input.viewport().maximized.unwrap_or(false),
-        )
-    });
-    if !window_resize_enabled(crate::window::custom_titlebar(), fullscreen, maximized) {
-        return;
-    }
-
-    let Some(position) = ui.input(|input| input.pointer.hover_pos()) else {
-        return;
+    // Literal calls, so xgettext extracts each label.
+    let minimize = gettext(locale, "Minimize");
+    let maximize = gettext(locale, "Maximize");
+    let restore = gettext(locale, "Restore");
+    let close = gettext(locale, "Close");
+    let labels = fastframe_titlebar::Labels {
+        minimize: &minimize,
+        maximize: &maximize,
+        restore: &restore,
+        close: &close,
     };
-    let Some(direction) = resize_direction(ui.ctx().content_rect(), position) else {
-        return;
-    };
-    ui.ctx().set_cursor_icon(direction.1);
-    if ui.input(|input| input.pointer.primary_pressed()) {
-        ui.ctx()
-            .send_viewport_cmd(egui::ViewportCommand::BeginResize(direction.0));
-    }
-}
-
-const fn window_resize_enabled(on_windows: bool, fullscreen: bool, maximized: bool) -> bool {
-    on_windows && !fullscreen && !maximized
-}
-
-fn resize_direction(
-    window: Rect,
-    position: egui::Pos2,
-) -> Option<(egui::ResizeDirection, egui::CursorIcon)> {
-    if !window.contains(position) {
-        return None;
-    }
-    let [left, right, top, bottom] = [
-        position.x - window.left(),
-        window.right() - position.x,
-        position.y - window.top(),
-        window.bottom() - position.y,
-    ];
-    let mut x = i8::from(right <= WINDOW_RESIZE_BORDER) - i8::from(left <= WINDOW_RESIZE_BORDER);
-    let mut y = i8::from(bottom <= WINDOW_RESIZE_BORDER) - i8::from(top <= WINDOW_RESIZE_BORDER);
-    if y != 0 {
-        x = i8::from(right <= WINDOW_RESIZE_CORNER) - i8::from(left <= WINDOW_RESIZE_CORNER);
-    }
-    if x != 0 {
-        y = i8::from(bottom <= WINDOW_RESIZE_CORNER) - i8::from(top <= WINDOW_RESIZE_CORNER);
-    }
-    use egui::{CursorIcon as C, ResizeDirection as D};
-    match (x, y) {
-        (-1, -1) => Some((D::NorthWest, C::ResizeNwSe)),
-        (1, -1) => Some((D::NorthEast, C::ResizeNeSw)),
-        (-1, 1) => Some((D::SouthWest, C::ResizeNeSw)),
-        (1, 1) => Some((D::SouthEast, C::ResizeNwSe)),
-        (-1, 0) => Some((D::West, C::ResizeHorizontal)),
-        (1, 0) => Some((D::East, C::ResizeHorizontal)),
-        (0, -1) => Some((D::North, C::ResizeVertical)),
-        (0, 1) => Some((D::South, C::ResizeVertical)),
-        _ => None,
-    }
+    fastframe_titlebar::controls(ui, &style, &labels);
 }
 
 pub fn blend(base: Color32, tint: Color32, amount: f32) -> Color32 {
@@ -768,17 +718,14 @@ fn toasts(app: &mut App, ctx: &egui::Context, bottom_offset: f32) {
 #[cfg(test)]
 mod window_chrome_tests {
     use super::*;
+    use fastframe_titlebar::Footprint;
 
-    #[test]
-    fn chrome_visibility_matches_window_state() {
-        assert!(windows_chrome_visible(true, false));
-        assert!(!windows_chrome_visible(true, true));
-        assert!(!windows_chrome_visible(false, false));
-        assert!(window_resize_enabled(true, false, false));
-        assert!(!window_resize_enabled(true, false, true));
-        assert!(!window_resize_enabled(true, true, false));
-        assert!(!window_resize_enabled(false, false, false));
-    }
+    /// Windows' three buttons in its 48-point header.
+    const BUTTONS: Footprint = Footprint {
+        left: 0.0,
+        right: 3.0 * 36.0 + 5.0,
+        height: theme::CUSTOM_TOP_BAR_HEIGHT,
+    };
 
     #[test]
     fn the_side_panels_drag_a_window_without_a_native_title_bar() {
@@ -789,15 +736,8 @@ mod window_chrome_tests {
 
     #[test]
     fn caption_space_belongs_to_the_outermost_header() {
-        let values = |queue, lyrics| {
-            let space = controls_reservation(
-                true,
-                false,
-                queue,
-                lyrics,
-                f32::INFINITY,
-                WINDOWS_WINDOW_CONTROLS_WIDTH,
-            );
+        let values = |footprint, queue, lyrics| {
+            let space = controls_reservation(footprint, queue, lyrics, f32::INFINITY);
             [
                 space.topbar_width,
                 space.topbar_top,
@@ -805,93 +745,85 @@ mod window_chrome_tests {
                 space.lyrics_top,
             ]
         };
-        assert_eq!(
-            values(false, false),
-            [WINDOWS_WINDOW_CONTROLS_WIDTH, 0.0, 0.0, 0.0]
-        );
-        assert_eq!(
-            values(true, false),
-            [0.0, 0.0, WINDOWS_WINDOW_CONTROLS_HEIGHT, 0.0]
-        );
-        assert_eq!(
-            values(false, true),
-            [0.0, 0.0, 0.0, WINDOWS_WINDOW_CONTROLS_HEIGHT]
-        );
-        assert_eq!(
-            values(true, true),
-            [0.0, 0.0, WINDOWS_WINDOW_CONTROLS_HEIGHT, 0.0]
-        );
-        assert_eq!(
-            controls_reservation(
-                true,
-                true,
-                true,
-                true,
-                f32::INFINITY,
-                WINDOWS_WINDOW_CONTROLS_WIDTH
-            ),
-            WindowControlsReservation {
-                topbar_width: 0.0,
-                topbar_top: 0.0,
-                queue_top: 0.0,
-                lyrics_top: 0.0,
-            }
-        );
+        let [width, height] = [BUTTONS.right, BUTTONS.height];
+        assert_eq!(values(BUTTONS, false, false), [width, 0.0, 0.0, 0.0]);
+        assert_eq!(values(BUTTONS, true, false), [0.0, 0.0, height, 0.0]);
+        assert_eq!(values(BUTTONS, false, true), [0.0, 0.0, 0.0, height]);
+        assert_eq!(values(BUTTONS, true, true), [0.0, 0.0, height, 0.0]);
+        // No buttons on the right: full screen, the native frame, macOS's
+        // traffic lights, or a GNOME layout with them all on the left.
+        let none = Footprint {
+            left: 50.0,
+            ..Footprint::default()
+        };
+        for (queue, lyrics) in [(false, false), (true, false), (false, true)] {
+            assert_eq!(values(none, queue, lyrics), [0.0; 4]);
+        }
     }
 
     #[test]
     fn minimum_windows_window_stacks_caption_space_above_the_topbar() {
         let available = 760.0 - 250.0;
-        let space = controls_reservation(
-            true,
-            false,
-            false,
-            false,
-            available,
-            WINDOWS_WINDOW_CONTROLS_WIDTH,
-        );
+        let space = controls_reservation(BUTTONS, false, false, available);
         assert_eq!(space.topbar_width, 0.0);
-        assert_eq!(space.topbar_top, WINDOWS_WINDOW_CONTROLS_HEIGHT);
+        assert_eq!(space.topbar_top, BUTTONS.height);
 
-        let inline = controls_reservation(
-            true,
-            false,
-            false,
-            false,
-            WINDOWS_MIN_INLINE_TOPBAR_WIDTH,
-            WINDOWS_WINDOW_CONTROLS_WIDTH,
-        );
-        assert_eq!(inline.topbar_width, WINDOWS_WINDOW_CONTROLS_WIDTH);
+        let inline =
+            controls_reservation(BUTTONS, false, false, TOPBAR_MIN_CONTENT + BUTTONS.right);
+        assert_eq!(inline.topbar_width, BUTTONS.right);
         assert_eq!(inline.topbar_top, 0.0);
-    }
-
-    #[test]
-    fn resize_hit_test_covers_edges_and_corners() {
-        use egui::ResizeDirection as D;
-
-        let window = Rect::from_min_max(egui::pos2(20.0, 30.0), egui::pos2(120.0, 110.0));
-        for (position, expected) in [
-            (egui::pos2(21.0, 31.0), Some(D::NorthWest)),
-            (egui::pos2(70.0, 31.0), Some(D::North)),
-            (egui::pos2(119.0, 31.0), Some(D::NorthEast)),
-            (egui::pos2(21.0, 70.0), Some(D::West)),
-            (egui::pos2(70.0, 70.0), None),
-            (egui::pos2(119.0, 70.0), Some(D::East)),
-            (egui::pos2(21.0, 109.0), Some(D::SouthWest)),
-            (egui::pos2(70.0, 109.0), Some(D::South)),
-            (egui::pos2(119.0, 109.0), Some(D::SouthEast)),
-        ] {
-            assert_eq!(
-                resize_direction(window, position).map(|hit| hit.0),
-                expected
-            );
-        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A page fades from its cover's colour while art tints the interface,
+    /// otherwise from the palette's own wash, and from nothing when the
+    /// palette has none.
+    #[test]
+    fn the_header_fades_from_the_art_or_the_palettes_wash() {
+        let mut palette = theme::Palette::dark();
+        assert_eq!(header_wash(&palette, false, None), None);
+
+        let art = Color32::from_rgb(0x50, 0x38, 0xc8);
+        let (page, _) = header_wash(&palette, false, Some(art)).unwrap();
+        let (overview, _) = header_wash(&palette, true, Some(art)).unwrap();
+        assert_eq!(page, blend(palette.window, art, 0.85));
+        assert_eq!(overview, blend(palette.window, art, 0.45));
+
+        palette.tint = Color32::from_black_alpha(24);
+        assert_eq!(
+            header_wash(&palette, false, None),
+            Some((palette.tint, Color32::TRANSPARENT))
+        );
+        assert_eq!(
+            header_wash(&palette, false, Some(art)).unwrap().0,
+            page,
+            "art wins over the wash"
+        );
+    }
+
+    /// The wash sits at the top of an unscrolled page and leaves with the
+    /// hero as the page scrolls, instead of staying behind the page.
+    #[test]
+    fn the_header_wash_scrolls_away_with_the_page() {
+        let panel = Rect::from_min_size(egui::pos2(0.0, 80.0), vec2(800.0, 600.0));
+        assert_eq!(header_rect(panel, 0.0).min, panel.min);
+        assert_eq!(header_rect(panel, 0.0).width(), 800.0);
+        assert_eq!(header_rect(panel, 120.0).min.y, panel.min.y - 120.0);
+        assert_eq!(header_rect(panel, 120.0).max.y, panel.min.y + 220.0);
+        assert!(
+            header_rect(panel, 400.0).max.y < panel.min.y,
+            "gone once scrolled past"
+        );
+        assert_eq!(
+            header_rect(panel, -5.0).min,
+            panel.min,
+            "no overscroll bounce"
+        );
+    }
 
     /// The header casts a shadow only on a page scrolled under it, and it
     /// is black in both themes, never the page's own colour.

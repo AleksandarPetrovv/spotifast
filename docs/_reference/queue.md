@@ -75,6 +75,14 @@ not consume a queue row or restore an older queue saved on this computer.
    the same song twice and it plays twice. A double-click only counts
    once.
 
+   **Play next** puts a song, or a selection of songs in displayed order,
+   at the front of **Playing next**, before the songs already queued. It
+   leaves the current song playing and keeps repeated songs as separate
+   entries. Right-click a song or selection to find it beside **Add to queue**.
+   It is enabled only while this computer is the active player, including
+   when paused. Spotify does not let Spotifast insert at the front of another
+   device's queue.
+
    A local file queued on this computer goes straight to its player;
    Spotify's queue never learns it, so its row stays until the song starts
    or the file cannot load. Another device, or Spotify itself, cannot reach

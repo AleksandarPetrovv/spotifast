@@ -13,6 +13,7 @@ pub mod cast;
 pub mod credentials;
 #[cfg(any(test, feature = "demo"))]
 pub mod demo;
+pub mod device_history;
 pub mod emoji;
 pub mod eq;
 pub mod history;
@@ -22,6 +23,7 @@ pub mod images;
 pub mod liked;
 pub mod limiter;
 pub mod link;
+pub mod local_tags;
 pub mod localfiles;
 pub mod lyrics;
 #[cfg(target_os = "macos")]
@@ -36,6 +38,7 @@ pub mod made_for_you;
 pub mod milkdrop;
 pub mod model;
 pub mod motion;
+pub mod new_releases;
 pub mod notch;
 pub mod opener;
 pub mod paths;

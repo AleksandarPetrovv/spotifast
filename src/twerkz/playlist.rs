@@ -13,9 +13,22 @@ use protobuf::Message as _;
 
 /// Appends `uris` to the end of the playlist.
 pub async fn append(session: &Session, playlist_id: &str, uris: &[String]) -> Result<()> {
+    insert(session, playlist_id, uris, None).await
+}
+
+/// Inserts `uris` before row `position`, or at the end without one.
+pub async fn insert(
+    session: &Session,
+    playlist_id: &str,
+    uris: &[String],
+    position: Option<u32>,
+) -> Result<()> {
     let now = jiff::Timestamp::now().as_millisecond();
     let mut add = Add::new();
-    add.set_add_last(true);
+    match position {
+        Some(at) => add.set_from_index(at as i32),
+        None => add.set_add_last(true),
+    }
     for uri in uris {
         let mut item = Item::new();
         item.set_uri(uri.clone());

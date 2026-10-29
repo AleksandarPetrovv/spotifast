@@ -10,7 +10,7 @@ const CHOICE: &str = "choice.txt";
 const SYSTEM: &str = "system";
 
 pub fn folder() -> PathBuf {
-    super::jobs::root(&crate::paths::AppDirs::discover()).join("emoji")
+    super::jobs::root(&crate::paths::AppDirs::discover().dirs).join("emoji")
 }
 
 fn fonts_in(folder: &Path) -> Vec<PathBuf> {

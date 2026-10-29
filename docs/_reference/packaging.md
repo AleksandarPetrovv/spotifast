@@ -6,9 +6,16 @@ nav_order: 20
 
 Spotifast keeps release asset definitions, nFPM configuration and native AUR and
 Homebrew templates in `native-packages.yaml` and `packaging/`. Common automation comes from the pinned
-[native-packages](https://github.com/crmne/native-packages) gem, installed with `gem install native-packages --version 0.9.0`.
+[native-packages](https://github.com/crmne/native-packages) gem, installed with `gem install native-packages --version 0.10.0`.
 
 Stable releases build the existing Linux, macOS and Windows artifacts first.
+The Linux build jobs also build the AppImages (`appimage-amd64`,
+`appimage-arm64`) from the archives they just made, each with a `.zsync`
+file beside it, so the signed `checksums.txt` lists both and the app's
+updater can replace an AppImage with a signed one. Each AppImage carries the
+update information `gh-releases-zsync|crmne|spotifast|latest|spotifast-*-ARCH.AppImage.zsync`
+for AppImageUpdate and the updaters built on it; `packaging/release-names.py`
+reads it back and checks each `.zsync` file before anything is signed.
 The shared packaging workflow then verifies their published checksums and attaches
 Linux DEB/RPM packages and a recipe archive. AUR and Homebrew publication require
 their configured repository variables and secrets. PRs build packages from a
@@ -40,6 +47,9 @@ Cancel. Closing ends the installed copy immediately, so unsaved changes may be
 lost. A silent uninstall stops without removing files, while a silent update
 closes the installed copy first. A portable copy elsewhere is never closed and
 never blocks either.
+Uninstalling the package also removes the folders the updater stages updates
+in (`.spotifast-update-*` inside the installation folder); an update keeps
+them, since the updater runs the package from one.
 See the repository's [maintainer packaging guide](https://github.com/crmne/spotifast/blob/main/PACKAGING.md)
 for commands and the shared tool's [platform coverage](https://github.com/crmne/native-packages/blob/main/docs/platforms.md)
 for the boundaries.

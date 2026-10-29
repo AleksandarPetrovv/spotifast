@@ -42,6 +42,18 @@ pub struct Page<T> {
 }
 
 impl<T> Page<T> {
+    /// A whole collection as one page, with nothing after it.
+    pub fn whole(items: Vec<T>) -> Self {
+        let count = u32::try_from(items.len()).unwrap_or(u32::MAX);
+        Self {
+            items,
+            total: count,
+            limit: count,
+            offset: 0,
+            next: None,
+        }
+    }
+
     pub fn next_offset(&self) -> Option<u32> {
         let consumed = self.limit.max(self.items.len() as u32);
         (self.next.is_some() && consumed > 0).then_some(self.offset + consumed)
@@ -1050,7 +1062,8 @@ mod tests {
     /// Spotify's blurry 64 pixel rendition only for covers of 32 pixels or
     /// less: a 44 point row takes the 300 pixel one. A page header takes the
     /// card's 300 pixel rendition at 100%, and the 640 from 125%; a card
-    /// keeps the 300 up to 150%.
+    /// keeps the 300 up to 150% and takes the 640 from 175%, the scaling
+    /// steps on either side of its switch at 163%.
     #[test]
     fn art_is_picked_for_the_display_pixels() {
         let images = [640, 300, 64].map(|width| Image {
@@ -1067,8 +1080,13 @@ mod tests {
         assert_eq!(pick(1.0, 44.0), Some("300"));
         assert_eq!(pick(1.0, 148.0), Some("300"));
         assert_eq!(pick(1.5, 148.0), Some("300"));
+        assert_eq!(pick(1.62, 148.0), Some("300"));
+        assert_eq!(pick(1.63, 148.0), Some("640"));
+        assert_eq!(pick(1.75, 148.0), Some("640"));
         assert_eq!(pick(2.0, 148.0), Some("640"));
         assert_eq!(pick(1.0, 212.0), Some("300"));
+        assert_eq!(pick(1.13, 212.0), Some("300"));
+        assert_eq!(pick(1.14, 212.0), Some("640"));
         assert_eq!(pick(1.25, 212.0), Some("640"));
         assert_eq!(art_target(1.25, 44.0), 69);
     }

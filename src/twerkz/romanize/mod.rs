@@ -64,7 +64,7 @@ static SETUP: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Where the Japanese dictionary is kept.
 fn root() -> PathBuf {
-    super::jobs::root(&crate::paths::AppDirs::discover()).join("romanize")
+    super::jobs::root(&crate::paths::AppDirs::discover().dirs).join("romanize")
 }
 
 /// The Japanese reader, fetching its dictionary on first use.

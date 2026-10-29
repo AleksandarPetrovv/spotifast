@@ -535,6 +535,7 @@ async fn ask(backend: &Backend, request: ApiRequest) -> ApiResponse {
     crate::backend::handle(
         &backend.api,
         &crate::made_for_you::MadeForYou::new(crate::http::Http::default()),
+        &crate::new_releases::NewReleases::new(crate::http::Http::default()),
         &crate::sonos::Controller::default(),
         backend.engine.as_deref(),
         &tokio::sync::Semaphore::new(1),

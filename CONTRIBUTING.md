@@ -82,9 +82,59 @@ implementation and regression tests live in the Copilot Triage repository.
    should be respected, and credentials must never appear in logs. Network
    behaviour belongs in the documentation.
 
+## Settled decisions
+
+These are decided. Issues and pull requests that reopen them are closed with a
+link here.
+
+### Full screen
+
+Full screen is the lyrics view: the cover, the player bar, and the lyrics when
+a song has them. It gets no further buttons, queue toggles, hints or a
+separate full-screen player.
+
+### One look
+
+Spotifast has one appearance, tinted by the album's colours, in light and
+dark. It does not take alternative themes.
+
+### Player bar buttons
+
+The player bar's buttons stay. Buttons that do not fit hide when the window is
+narrow, so there are no settings to hide individual buttons.
+
+### Mini player skins
+
+Skins live in one Mini player section of Settings, where the skin is a Winamp
+skin or, once supported, another kind. Another kind of skin does not get a
+section of its own.
+
+### Local files
+
+Local files play from the folder chosen in Settings. A view to browse them,
+several folders and similar requests wait for a design from the maintainer;
+until then they are collected, not promised.
+
+### Other projects' Spotify apps
+
+Spotifast never signs in with another project's Spotify Client ID. Until
+0.14.2 it used ncspot's, which ncspot's developer had registered for ncspot
+alone on their own Spotify account; they closed it to other apps in October
+2026, as was their right. A Client ID belongs to whoever registered it and
+its quota to their users, so the Web API runs on each person's own app, and a
+pull request that adds someone else's Client ID or redirect path is closed.
+
+### Windowing fixes
+
+Spotifast uses a winit fork shared with other apps, so a fix to how the
+operating system treats the window goes to winit upstream first, and the
+maintainer carries it in the fork. Spotifast does not patch window procedures
+or other native window code itself.
+
 ## Pull requests
 
-Keep each pull request to one change. Explain why it belongs in Spotifast,
+Keep each pull request to one change. Unrelated fixes, even small ones, go in
+separate pull requests. Explain why it belongs in Spotifast,
 what changed, and how you tested it. Avoid unrelated formatting, refactors,
 generated prose, and large mechanical rewrites.
 
@@ -112,6 +162,16 @@ request; the maintainer can carry it in a `crmne` fork until a release
 includes it. CI fails when `Cargo.toml`, `Cargo.lock` or `.cargo/config.toml`
 names any other git source or registry.
 
+### Settings
+
+Do not add a setting (a new field in `Settings`, a toggle, a slider, a choice
+of options) without the maintainer's approval in the issue first. The answer is
+usually no: prefer a good default that serves everyone, or a keyboard shortcut
+or command for the people who want something else. A pull request that adds a
+setting without that approval will be asked to remove it. CI fails when a pull
+request adds a field to a `Settings` struct in `src/settings.rs`, until the
+maintainer adds the `setting-approved` label.
+
 ### Visual reviews
 
 Review evidence lives in the pull request, never in the repository. Attach
@@ -122,6 +182,12 @@ else. CI fails when `docs/assets/` holds a file no page uses, or when an image,
 video or HTML file is named for a review (review, compare, comparison, before,
 after). Only images the project itself uses, such as a figure a documentation
 page shows or an icon the app draws, belong in the repository.
+
+The `screenshots` check fails when a pull request changes interface code
+(`src/ui/`, the theme, the skins, the window) and neither its description nor
+its author's comments hold an image or a recording. Attach the captures and
+re-run it. When such a change shows nothing new, such as a crash fix, the
+maintainer adds the `no-visual-change` label instead.
 
 Use actual before-and-after captures, from demo mode where possible. Match the
 data, page, interaction state, zoom and window size so the difference shows the
@@ -159,6 +225,7 @@ Run the same checks CI runs before submitting:
 ```sh
 python3 .github/scripts/check-dependency-sources.py
 python3 .github/scripts/check-review-evidence.py
+python3 .github/scripts/check-new-settings.py --base origin/main
 python3 packaging/test-launchers.py
 cargo fmt --all --check
 cargo clippy --locked --all-targets -- -D warnings
@@ -200,8 +267,8 @@ Translation changes also need `.github/scripts/update-translations.sh --check`,
 using GNU gettext tools with Rust support. Run the script without `--check` when
 translatable source strings change, and review any fuzzy or missing entries in
 the updated PO files. Normal Cargo builds compile the catalogs without gettext
-tools. See [Translating Spotifast](docs/_reference/translating.md) for the pilot
-scope and contributor workflow.
+tools. See [Translating Spotifast](docs/_reference/translating.md) for language
+coverage and the contributor workflow.
 
 Documentation deployments take their canonical URL from the domain configured
 in GitHub Pages. When changing domains, configure DNS and GitHub Pages before
