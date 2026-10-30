@@ -1,0 +1,189 @@
+name: Release
+
+run-name: bump to ${{ inputs.release_tag }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Release to rebuild
+        required: true
+        type: choice
+        options:
+          - v0.12.0
+          - v0.13.0
+          - v0.14.2
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    name: windows (${{ matrix.target }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+          - target: aarch64-pc-windows-msvc
+    env:
+      SOURCE_REF: ${{ inputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v7
+        if: ${{ inputs.release_tag == 'v0.12.0' || matrix.target == 'x86_64-pc-windows-msvc' }}
+        with:
+          ref: ${{ env.SOURCE_REF }}
+      - uses: dtolnay/rust-toolchain@stable
+        if: ${{ inputs.release_tag == 'v0.12.0' || matrix.target == 'x86_64-pc-windows-msvc' }}
+        with:
+          targets: ${{ matrix.target }}
+      - run: rustup target add ${{ matrix.target }}
+        if: ${{ inputs.release_tag == 'v0.12.0' || matrix.target == 'x86_64-pc-windows-msvc' }}
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: ${{ inputs.release_tag == 'v0.12.0' || matrix.target == 'x86_64-pc-windows-msvc' }}
+      - run: cargo build --release --no-default-features --target ${{ matrix.target }}
+        if: ${{ inputs.release_tag == 'v0.12.0' || matrix.target == 'x86_64-pc-windows-msvc' }}
+      - name: package v0.12.0
+        if: ${{ inputs.release_tag == 'v0.12.0' }}
+        shell: pwsh
+        run: |
+          $name = "spotifast-${{ inputs.release_tag }}-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force "dist\$name" | Out-Null
+          $files = "target\${{ matrix.target }}\release\spotifast.exe", "README.md", "LICENSE", "packaging\spotifast-portable.txt"
+          Copy-Item -Path $files -Destination "dist\$name"
+          Push-Location dist
+          & 7z a "$name.zip" $name
+          Pop-Location
+          $version = '${{ inputs.release_tag }}'.TrimStart('v')
+          $arch = "${{ matrix.target }}".Split("-")[0]
+          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) { $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
+          & $iscc "/DVersion=$version" "/DArch=$arch" "/DBinary=$PWD\target\${{ matrix.target }}\release\spotifast.exe" "/DOutputDir=$PWD\dist" packaging\windows\spotifast.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: package v0.13.0 or v0.14.2
+        if: ${{ inputs.release_tag != 'v0.12.0' && matrix.target == 'x86_64-pc-windows-msvc' }}
+        shell: pwsh
+        run: |
+          (Get-Content Cargo.toml -Raw).Replace('https://github.com/crmne/spotifast', 'https://github.com/AleksandarPetrovv/spotifast') | Set-Content Cargo.toml -NoNewline
+          dotnet tool install wix --version 5.0.2 --tool-path "$env:RUNNER_TEMP\wix"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:PATH = "$env:RUNNER_TEMP\wix;$env:PATH"
+          gem install native-packages --version ${{ inputs.release_tag == 'v0.13.0' && '0.9.0' || '0.10.0' }} --no-document
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $payload = "dist\msi-input-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force $payload | Out-Null
+          $files = "target\${{ matrix.target }}\release\spotifast.exe", "README.md", "LICENSE", "packaging\windows\spotifast-installer.txt"
+          Copy-Item -Path $files -Destination $payload
+          $packages = "$env:RUNNER_TEMP\windows-packages"
+          $version = '${{ inputs.release_tag }}'.TrimStart('v')
+          native-packages build --version $version --target windows-amd64 --defer-recipes --output $packages
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item "$packages\packages\windows-amd64\msi\*.msi" dist
+      - name: rename the v0.13.0 msi for its unchanged notes
+        if: ${{ inputs.release_tag == 'v0.13.0' && matrix.target == 'x86_64-pc-windows-msvc' }}
+        shell: pwsh
+        run: Move-Item (Get-ChildItem dist -Filter '*.msi' | Select-Object -First 1).FullName 'dist\spotifast-v0.13.0-windows-amd64.msi'
+      - uses: actions/upload-artifact@v7
+        if: ${{ inputs.release_tag == 'v0.12.0' || matrix.target == 'x86_64-pc-windows-msvc' }}
+        with:
+          name: windows-${{ matrix.target }}
+          path: |
+            dist/*.zip
+            dist/*-setup.exe
+            dist/*.msi
+          if-no-files-found: error
+
+  macos:
+    name: macos universal
+    runs-on: macos-latest
+    env:
+      SOURCE_REF: ${{ inputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.SOURCE_REF }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - run: |
+          cargo build --release --no-default-features --target aarch64-apple-darwin
+          cargo build --release --no-default-features --target x86_64-apple-darwin
+      - run: |
+          mkdir universal
+          lipo -create target/aarch64-apple-darwin/release/spotifast target/x86_64-apple-darwin/release/spotifast -output universal/spotifast
+      - run: |
+          mkdir -p dist/macos-input
+          version="${{ inputs.release_tag }}"
+          bash packaging/macos/bundle.sh universal/spotifast dist/macos-input/Spotifast.app "${version#v}"
+      - run: ruby packaging/macos/dmg.rb dist/macos-input "dist/spotifast-${{ inputs.release_tag }}-macos-universal.dmg"
+      - run: |
+          version="${{ inputs.release_tag }}"
+          pkgbuild --component dist/macos-input/Spotifast.app --install-location /Applications \
+            --identifier rocks.spotifast.Spotifast --version "${version#v}" \
+            "dist/spotifast-${{ inputs.release_tag }}-macos-universal.pkg"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos-universal
+          path: |
+            dist/*.dmg
+            dist/*.pkg
+          if-no-files-found: error
+
+  publish:
+    name: github release
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    env:
+      SOURCE_REF: ${{ inputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.SOURCE_REF }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v7
+        with:
+          path: dist
+          merge-multiple: true
+      - run: python3 packaging/release-names.py dist '${{ inputs.release_tag }}'
+      - uses: ruby/setup-ruby@v1
+        if: ${{ inputs.release_tag != 'v0.12.0' }}
+        with:
+          ruby-version: '4.0'
+      - name: sign v0.13.0 and v0.14.2 checksums
+        if: ${{ inputs.release_tag != 'v0.12.0' }}
+        env:
+          SPOTIFAST_UPDATE_SIGNING_KEY: ${{ secrets.SPOTIFAST_UPDATE_SIGNING_KEY }}
+        run: |
+          sed -i 's#https://github.com/crmne/spotifast#https://github.com/AleksandarPetrovv/spotifast#' Cargo.toml
+          gem install native-packages --version ${{ inputs.release_tag == 'v0.13.0' && '0.9.0' || '0.10.0' }} --no-document
+          native-packages sign-checksums dist/checksums.txt --public-key assets/update-public-key.hex --key-env SPOTIFAST_UPDATE_SIGNING_KEY
+          native-packages verify-checksums dist/checksums.txt --public-key assets/update-public-key.hex
+      - name: remove old assets
+        if: ${{ inputs.release_tag != 'v0.14.2' }}
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const release = await github.rest.repos.getReleaseByTag({ owner: context.repo.owner, repo: context.repo.repo, tag: '${{ inputs.release_tag }}' });
+            const assets = await github.paginate(github.rest.repos.listReleaseAssets, { owner: context.repo.owner, repo: context.repo.repo, release_id: release.data.id });
+            await Promise.all(assets.map(({ id }) => github.rest.repos.deleteReleaseAsset({ owner: context.repo.owner, repo: context.repo.repo, asset_id: id })));
+      - name: update the existing release assets
+        if: ${{ inputs.release_tag != 'v0.14.2' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release_tag }}
+          files: dist/*
+          preserve_order: true
+      - name: publish v0.14.2
+        if: ${{ inputs.release_tag == 'v0.14.2' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.release_tag }}
+          name: Spotifast ${{ inputs.release_tag }}
+          body_path: packaging/release-notes/v0.14.2.md
+          generate_release_notes: false
+          files: dist/*
