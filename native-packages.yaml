@@ -139,7 +139,7 @@ targets:
     compiler_target: x86_64-unknown-linux-gnu
     formats: [appimage]
     appimage:
-      update_information: gh-releases-zsync|crmne|spotifast|latest|spotifast-*-x86_64.AppImage.zsync
+      update_information: gh-releases-zsync|AleksandarPetrovv|spotifast|latest|spotifast-*-x86_64.AppImage.zsync
     input:
       local: dist/spotifast-v@VERSION@-x86_64-unknown-linux-gnu.tar.gz
       release_asset: spotifast-v@VERSION@-x86_64-unknown-linux-gnu.tar.gz
@@ -150,7 +150,7 @@ targets:
     compiler_target: aarch64-unknown-linux-gnu
     formats: [appimage]
     appimage:
-      update_information: gh-releases-zsync|crmne|spotifast|latest|spotifast-*-aarch64.AppImage.zsync
+      update_information: gh-releases-zsync|AleksandarPetrovv|spotifast|latest|spotifast-*-aarch64.AppImage.zsync
     input:
       local: dist/spotifast-v@VERSION@-aarch64-unknown-linux-gnu.tar.gz
       release_asset: spotifast-v@VERSION@-aarch64-unknown-linux-gnu.tar.gz
