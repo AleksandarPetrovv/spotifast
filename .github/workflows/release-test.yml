@@ -65,6 +65,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
       - run: |
           cargo build --release --no-default-features --target aarch64-apple-darwin
           cargo build --release --no-default-features --target x86_64-apple-darwin

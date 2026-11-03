@@ -13,6 +13,7 @@ use egui::{
 };
 
 use crate::app::App;
+#[cfg(feature = "milkdrop")]
 use crate::i18n::gettext;
 use crate::model::Action;
 use crate::settings::VisMode;

@@ -4940,6 +4940,7 @@ impl App {
     /// skin, whose panel has it; not on a trip to full screen from a skin,
     /// which took it along; and not while MilkDrop is behind the lyrics. One
     /// child draws at a time, and the window comes back when that ends.
+    #[cfg(feature = "milkdrop")]
     fn plain_milkdrop_wanted(&self) -> bool {
         self.settings.milkdrop_open
             && !self.milkdrop_framed()

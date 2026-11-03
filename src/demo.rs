@@ -1113,6 +1113,7 @@ const DEMO_CLIENT_ID: &str = "0123456789abcdef0123456789abcdef";
 /// there. The demo may be pointed at a skin in someone's real folder, so it
 /// writes nothing through a link and never opens the file it would replace:
 /// the copy arrives by rename, which replaces a name, not what it points at.
+#[cfg(any(feature = "demo", all(test, unix)))]
 fn place_skin(source: &std::path::Path, folder: &std::path::Path) -> std::io::Result<String> {
     use std::io::{Error, ErrorKind};
     let name = source
@@ -5207,6 +5208,7 @@ mod tests {
     }
 
     /// Where a line of lyrics was drawn, in a frame of full screen lyrics.
+    #[cfg(feature = "milkdrop")]
     fn lyric_at(ctx: &egui::Context, app: &mut App, line: &str) -> egui::Pos2 {
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(

@@ -427,6 +427,7 @@ fn walk(folder: &Path, depth: usize, files: &mut Vec<PathBuf>) {
 /// The program to start MilkDrop's child from. An update that replaces the
 /// running file leaves `current_exe` naming nothing, but Linux keeps the
 /// running file reachable through `/proc`.
+#[cfg(feature = "milkdrop")]
 pub(crate) fn this_program() -> std::io::Result<std::path::PathBuf> {
     let own = Path::new("/proc/self/exe");
     if cfg!(target_os = "linux") && own.exists() {

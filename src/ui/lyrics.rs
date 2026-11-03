@@ -577,12 +577,15 @@ fn preferred_backdrop_art(small: Option<String>, large: Option<String>) -> Optio
 
 /// How bright the brightest of the picture may stay behind the words, so a
 /// white preset reads like the dimmed art does.
+#[cfg(feature = "milkdrop")]
 const BACKDROP_GLOW: f32 = 0.2;
 /// The dimming's limits: even a dark preset's sparks stay this far under the
 /// white of the words, and a bright one is never lost altogether.
+#[cfg(feature = "milkdrop")]
 const BACKDROP_DIM: std::ops::RangeInclusive<f32> = 0.2..=0.32;
 
 /// How much of the picture's brightness to keep, for one this bright.
+#[cfg(feature = "milkdrop")]
 fn backdrop_dim(glow: f32) -> f32 {
     (BACKDROP_GLOW / glow.max(0.01)).clamp(*BACKDROP_DIM.start(), *BACKDROP_DIM.end())
 }
@@ -1049,6 +1052,7 @@ mod tests {
 
     /// A white picture ends up as dark as the dimmed art, and full white
     /// words on it above WCAG's 7:1.
+    #[cfg(feature = "milkdrop")]
     #[test]
     fn white_is_dimmed_until_the_words_read_on_it() {
         let dim = super::backdrop_dim(1.0);
@@ -1057,6 +1061,7 @@ mod tests {
         assert!(contrast >= 7.0, "{contrast}");
     }
 
+    #[cfg(feature = "milkdrop")]
     #[test]
     fn a_dark_picture_is_dimmed_less_but_never_left_alone() {
         assert!(super::backdrop_dim(0.1) > super::backdrop_dim(1.0));
