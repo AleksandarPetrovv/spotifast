@@ -727,7 +727,9 @@ fn transport(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>, region:
         )
     };
 
-    let shuffle_color = if shuffle { palette.accent } else { dim };
+    // twerkz: an off toggle sits a step below the other controls, so on reads at a glance.
+    let toggle_off = dim.lerp_to_gamma(palette.dim, 0.35);
+    let shuffle_color = if shuffle { palette.accent } else { toggle_off };
     let mut cell = centered(ui, slot(widths[0]));
     let shuffle_button = theme::icon_button(
         &mut cell,
@@ -749,6 +751,9 @@ fn transport(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>, region:
             gettext(app.locale, "Shuffle"),
         )
     });
+    if shuffle {
+        toggle_dot(ui, shuffle_button.rect, palette.accent);
+    }
     if shuffle_button.clicked() {
         app.actions.push(Action::ToggleShuffle);
     }
@@ -823,7 +828,7 @@ fn transport(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>, region:
     }
 
     let (repeat_icon, repeat_color, tooltip) = match repeat {
-        RepeatMode::Off => (Icon::Repeat, dim, gettext(app.locale, "Repeat")),
+        RepeatMode::Off => (Icon::Repeat, toggle_off, gettext(app.locale, "Repeat")),
         RepeatMode::Context => (
             Icon::Repeat,
             palette.accent,
@@ -836,7 +841,7 @@ fn transport(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>, region:
         ),
     };
     let mut cell = centered(ui, slot(widths[4]));
-    if theme::icon_button(
+    let repeat_button = theme::icon_button(
         &mut cell,
         repeat_icon,
         17.0,
@@ -847,9 +852,11 @@ fn transport(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>, region:
             palette.accent_hover
         },
         &tooltip,
-    )
-    .clicked()
-    {
+    );
+    if repeat != RepeatMode::Off {
+        toggle_dot(ui, repeat_button.rect, palette.accent);
+    }
+    if repeat_button.clicked() {
         app.actions.push(Action::CycleRepeat);
     }
 
@@ -1289,4 +1296,11 @@ mod player_bar_tint_tests {
         assert!(full_screen_button_fits(320.0));
         assert!(!full_screen_button_fits(200.0));
     }
+}
+
+/// twerkz: the small dot under an on toggle, as in Spotify, so its state
+/// does not hang on colour alone.
+fn toggle_dot(ui: &egui::Ui, button: Rect, color: egui::Color32) {
+    ui.painter()
+        .circle_filled(pos2(button.center().x, button.bottom() - 1.5), 2.0, color);
 }
