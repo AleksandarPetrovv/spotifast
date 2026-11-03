@@ -11398,7 +11398,8 @@ impl App {
     /// The repeat mode local playback follows: the engine's once it has a
     /// song, until then the one the last run saved.
     fn local_repeat(&self) -> RepeatMode {
-        if self.local.track.is_some() {
+        // twerkz: a stopped engine after a restart still holds a song, with repeat off.
+        if self.local.is_active() {
             self.local.repeat
         } else {
             self.repeat_wanted
@@ -19961,6 +19962,12 @@ mod tests {
         );
         app.local.track = Some(crate::player::LocalTrack::default());
         app.local.repeat = RepeatMode::Off;
+        assert_eq!(
+            app.local_repeat(),
+            RepeatMode::Track,
+            "a stopped engine's leftover song does not count"
+        );
+        app.local.playback = Playback::Paused;
         assert_eq!(
             app.local_repeat(),
             RepeatMode::Off,

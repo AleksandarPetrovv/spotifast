@@ -942,6 +942,12 @@ impl Engine {
                 };
                 spirc.activate()?;
                 spirc.load(request)?;
+                // twerkz: the first load after a start drops its repeat options, so set it again.
+                if !spec.autoplay {
+                    let mode = spec.repeat.unwrap_or(repeat);
+                    spirc.repeat_track(mode == RepeatMode::Track)?;
+                    spirc.repeat(mode == RepeatMode::Context)?;
+                }
             }
         }
         Ok(())
