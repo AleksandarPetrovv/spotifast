@@ -1,6 +1,6 @@
 name: Release test
 
-run-name: test ${{ inputs.ref }}
+run-name: bump to ${{ inputs.ref }}
 
 # Builds everything the release workflow ships and signs the checksums, but
 # publishes nothing: the files stay on the run as artifacts.
