@@ -467,7 +467,7 @@ mod live {
     #[tokio::test]
     #[ignore = "network, downloads tools"]
     async fn downloads_and_tags_one_song() {
-        let dirs = crate::paths::AppDirs::discover();
+        let dirs = crate::paths::AppDirs::discover().dirs;
         let http = reqwest::Client::new();
         let tools = super::super::tools::ensure(&http, &super::super::jobs::tools_dir(&dirs), &|text| eprintln!("{text}"))
             .await

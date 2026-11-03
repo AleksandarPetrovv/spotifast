@@ -265,7 +265,7 @@ fn unzip_one(archive: &Path, name: &str, target: &Path) -> Result<()> {
     let mut zip = zip::ZipArchive::new(file).context("broken archive")?;
     for index in 0..zip.len() {
         let mut entry = zip.by_index(index)?;
-        let matches = Path::new(entry.name())
+        let matches = Path::new(entry.name()?.as_ref())
             .file_name()
             .is_some_and(|file| file == name);
         if matches && entry.is_file() {

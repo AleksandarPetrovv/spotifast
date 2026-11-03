@@ -42,7 +42,14 @@ requests. Local files are omitted too, except when playback would run on
 this computer and local folders are set in Settings: then local rows join
 the request in displayed order. The displayed rows keep their positions,
 and selecting a
-repeated song starts that occurrence. A filtered playlist or Liked Songs view
+repeated song starts that occurrence. In a playlist's original order, a song
+that appears more than once among the loaded rows starts at the chosen copy's
+playlist position, provided the rows load from the beginning and no missing
+or local entry comes before it; otherwise it starts by name, which plays the
+first copy. A song started from a row marks only that row as playing and
+loading; other copies in the same list look like ordinary rows until another
+song plays. Another playlist that also holds the playing song shows it as an
+ordinary row, since the song is not playing from there. A filtered playlist or Liked Songs view
 plays its matching songs in displayed order, including duplicates. An empty or entirely
 unplayable view disables Play instead of starting the unfiltered context.
 
@@ -133,7 +140,13 @@ not consume a queue row or restore an older queue saved on this computer.
    promptly without waiting for the song to finish.
 
 9. **Closing the app keeps the queue.** Spotifast saves it locally. When you
-   resume the last song, it restores your queued songs and playlist position.
+   resume the last song, it restores your queued songs and playlist position,
+   and the playlist carries on after that song, even when it was paused or
+   playing from a sorted view when you closed the app.
+
+   A song the playlist no longer holds, such as a recommendation that followed
+   its end, plays on its own at its saved position, followed by your queued
+   songs and, with Autoplay on, Spotify's recommendations for that song.
 
 10. **Old answers from Spotify are ignored.** Queue responses can be a few
     seconds late. Spotifast ignores stale responses and asks again. Your

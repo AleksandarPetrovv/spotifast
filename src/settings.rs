@@ -265,6 +265,8 @@ impl SlowAppBanner {
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    /// Run the optional, separately downloaded Spotify Soloist player.
+    pub soloist_enabled: bool,
     /// The Spotify Connect name other devices see.
     pub device_name: String,
     /// 96, 160, or 320 kbps.
@@ -439,6 +441,11 @@ pub struct Settings {
     pub milkdrop_scale: u32,
     /// The MilkDrop window fills the screen.
     pub milkdrop_fullscreen: bool,
+    /// The MilkDrop panel's height in the mini player, in skin pixels.
+    pub milkdrop_panel_height: u32,
+    /// MilkDrop rather than the cover's art behind full screen lyrics.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lyrics_milkdrop: bool,
     /// The MilkDrop window's size in logical points, when not full-screen.
     pub milkdrop_size: [f32; 2],
     /// Which proxy to use. Older files without this field stay on `system`.
@@ -487,6 +494,7 @@ impl Default for Settings {
     /// settings files, including an inactive playlist ownership filter.
     fn default() -> Self {
         Self {
+            soloist_enabled: false,
             device_name: "Spotifast".to_string(),
             bitrate: 320,
             normalisation: false,
@@ -563,6 +571,8 @@ impl Default for Settings {
             milkdrop_screen_hz: 0,
             milkdrop_scale: 1,
             milkdrop_fullscreen: false,
+            milkdrop_panel_height: 232,
+            lyrics_milkdrop: false,
             milkdrop_size: crate::milkdrop::DEFAULT_SIZE,
             proxy_mode: ProxyMode::System,
             proxy: String::new(),
@@ -1888,6 +1898,14 @@ pub struct CachedRootlist {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SessionState {
+    /// One-time player setup, including for installations upgraded from before Soloist.
+    pub soloist_onboarding: SoloistOnboarding,
+    /// Separate Mac output fader. Absent in older sessions means unity gain.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub soloist_output_volume: Option<u8>,
+    /// The level Soloist's player was left at; it forgets it between launches.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub soloist_volume: Option<u8>,
     /// Recent explicit output choices, scoped to the verified Spotify account.
     pub device_history: crate::device_history::DeviceHistory,
     pub last_page: Option<String>,
@@ -1942,6 +1960,27 @@ pub struct SessionState {
     pub lyrics_fullscreen_from: Option<WindowMode>,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SoloistOnboarding {
+    #[default]
+    Welcome,
+    Setup,
+    Complete,
+}
+
+impl SoloistOnboarding {
+    /// Existing Soloist listeners have already chosen. An interrupted setup
+    /// resumes even if its download enabled the player before the app closed.
+    pub fn restore(self, enabled: bool) -> Self {
+        if enabled && self == Self::Welcome {
+            Self::Complete
+        } else {
+            self
+        }
+    }
+}
+
 /// Whether a window was full screen, and whether it was maximized.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -1977,8 +2016,50 @@ impl SessionState {
 
 #[cfg(test)]
 mod session_tests {
-    use super::{CachedRootlist, SessionState};
+    use super::{CachedRootlist, SessionState, SoloistOnboarding};
     use crate::player::RootlistEntry;
+
+    #[test]
+    fn soloist_output_volume_restores_without_changing_old_sessions() {
+        let old: SessionState = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.soloist_output_volume, None);
+        for volume in [0, 25, 100] {
+            let session = SessionState {
+                soloist_output_volume: Some(volume),
+                ..old.clone()
+            };
+            let saved: SessionState = serde_json::from_str(&session.encode().unwrap()).unwrap();
+            assert_eq!(saved.soloist_output_volume, Some(volume));
+            let session = SessionState {
+                soloist_volume: Some(volume),
+                ..old.clone()
+            };
+            let saved: SessionState = serde_json::from_str(&session.encode().unwrap()).unwrap();
+            assert_eq!(saved.soloist_volume, Some(volume));
+        }
+    }
+
+    #[test]
+    fn player_setup_migrates_old_sessions_and_resumes_an_interrupted_setup() {
+        let old: SessionState = serde_json::from_str(r#"{"last_page":"home"}"#).unwrap();
+        assert_eq!(
+            old.soloist_onboarding.restore(false),
+            SoloistOnboarding::Welcome
+        );
+        assert_eq!(
+            old.soloist_onboarding.restore(true),
+            SoloistOnboarding::Complete
+        );
+        for state in [SoloistOnboarding::Setup, SoloistOnboarding::Complete] {
+            let session = SessionState {
+                soloist_onboarding: state,
+                ..old.clone()
+            };
+            let saved: SessionState = serde_json::from_str(&session.encode().unwrap()).unwrap();
+            assert_eq!(saved.soloist_onboarding.restore(true), state);
+            assert_eq!(saved.soloist_onboarding.restore(false), state);
+        }
+    }
 
     /// A session saved before the maximized state was remembered keeps its
     /// window size and positions, and reads as an ordinary window.
