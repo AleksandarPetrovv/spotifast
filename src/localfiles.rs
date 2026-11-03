@@ -12,7 +12,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use symphonia::core::codecs::CodecParameters;
 use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::meta::{MetadataOptions, StandardTagKey};
@@ -520,7 +519,6 @@ fn read_tags(path: &Path) -> Result<(String, String, String, u32, u64), EntryErr
         .format
         .default_track()
         .ok_or_else(|| EntryError::Content("failed to find an audio track".into()))?;
-    engine_decodable(&track.codec_params).map_err(EntryError::Content)?;
     let time_base = track
         .codec_params
         .time_base
@@ -538,31 +536,6 @@ fn read_tags(path: &Path) -> Result<(String, String, String, u32, u64), EntryErr
     .unwrap_or(u32::MAX);
 
     Ok((artist, album, title, duration_ms, time.seconds))
-}
-
-/// The engine's symphonia decoder is fixed to 44.1 kHz stereo (librespot's
-/// own TODO notes the official client resamples other rates; this one does
-/// not). A track whose declared parameters already say otherwise fails to
-/// decode on every play, so keep it out of the index instead of offering a
-/// row that can never start. Parameters the container leaves unstated pass
-/// here: the decoder derives them when it can, and only a definitive
-/// mismatch is certain to fail.
-fn engine_decodable(params: &CodecParameters) -> Result<(), String> {
-    if let Some(rate) = params.sample_rate
-        && rate != librespot_playback::SAMPLE_RATE
-    {
-        return Err(format!(
-            "the playback engine only decodes 44.1 kHz audio, and this file is {rate} Hz"
-        ));
-    }
-    if let Some(channels) = params.channels
-        && channels.count() != usize::from(librespot_playback::NUM_CHANNELS)
-    {
-        return Err(format!(
-            "the playback engine only decodes stereo audio, and this file declares {channels}"
-        ));
-    }
-    Ok(())
 }
 
 /// Extract the first artist from a multi-value tag.
@@ -883,35 +856,6 @@ mod tests {
         assert_eq!(after.files[0], kept);
 
         let _ = std::fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn engine_decodable_accepts_what_the_engine_plays() {
-        use symphonia::core::audio::Channels;
-
-        let mut params = CodecParameters::new();
-        // Containers are free to leave either unstated; the decoder derives
-        // them when it can.
-        assert!(engine_decodable(&params).is_ok());
-
-        params.sample_rate = Some(librespot_playback::SAMPLE_RATE);
-        params.channels = Some(Channels::FRONT_LEFT | Channels::FRONT_RIGHT);
-        assert!(engine_decodable(&params).is_ok());
-    }
-
-    #[test]
-    fn engine_decodable_rejects_what_the_engine_refuses_to_decode() {
-        use symphonia::core::audio::Channels;
-
-        let mut params = CodecParameters::new();
-        params.sample_rate = Some(48_000);
-        let error = engine_decodable(&params).unwrap_err();
-        assert!(error.contains("44.1 kHz"), "{error}");
-
-        let mut params = CodecParameters::new();
-        params.channels = Some(Channels::FRONT_CENTRE);
-        let error = engine_decodable(&params).unwrap_err();
-        assert!(error.contains("stereo"), "{error}");
     }
 
     fn make_index(files: Vec<LocalFile>) -> Index {
