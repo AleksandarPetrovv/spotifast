@@ -1,0 +1,132 @@
+name: Release test
+
+run-name: test ${{ inputs.ref }}
+
+# Builds everything the release workflow ships and signs the checksums, but
+# publishes nothing: the files stay on the run as artifacts.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag or commit to build
+        required: true
+        default: main
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    name: windows (x86_64-pc-windows-msvc)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - uses: ilammy/msvc-dev-cmd@v1
+      - run: cargo build --release --no-default-features --target x86_64-pc-windows-msvc
+      - name: package the msi
+        shell: pwsh
+        run: |
+          (Get-Content Cargo.toml -Raw).Replace('https://github.com/crmne/spotifast', 'https://github.com/AleksandarPetrovv/spotifast') | Set-Content Cargo.toml -NoNewline
+          dotnet tool install wix --version 5.0.2 --tool-path "$env:RUNNER_TEMP\wix"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:PATH = "$env:RUNNER_TEMP\wix;$env:PATH"
+          gem install native-packages --version 0.11.0 --no-document
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $payload = "dist\msi-input-x86_64-pc-windows-msvc"
+          New-Item -ItemType Directory -Force $payload | Out-Null
+          $files = "target\x86_64-pc-windows-msvc\release\spotifast.exe", "README.md", "LICENSE", "packaging\windows\spotifast-installer.txt"
+          Copy-Item -Path $files -Destination $payload
+          $packages = "$env:RUNNER_TEMP\windows-packages"
+          $version = (cargo metadata --no-deps --format-version 1 | ConvertFrom-Json).packages[0].version
+          native-packages build --version $version --target windows-amd64 --defer-recipes --output $packages
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Copy-Item "$packages\packages\windows-amd64\msi\*.msi" dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-x86_64-pc-windows-msvc
+          path: dist/*.msi
+          if-no-files-found: error
+
+  macos:
+    name: macos universal
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - run: |
+          cargo build --release --no-default-features --target aarch64-apple-darwin
+          cargo build --release --no-default-features --target x86_64-apple-darwin
+      - run: |
+          mkdir universal
+          lipo -create target/aarch64-apple-darwin/release/spotifast target/x86_64-apple-darwin/release/spotifast -output universal/spotifast
+      - run: |
+          version=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+          mkdir -p dist/macos-input
+          bash packaging/macos/bundle.sh universal/spotifast dist/macos-input/Spotifast.app "$version"
+      - run: ruby packaging/macos/dmg.rb dist/macos-input "dist/spotifast-v${VERSION}-macos-universal.dmg"
+      - run: |
+          pkgbuild --component dist/macos-input/Spotifast.app --install-location /Applications \
+            --identifier rocks.spotifast.Spotifast --version "$VERSION" \
+            "dist/spotifast-v${VERSION}-macos-universal.pkg"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos-universal
+          path: |
+            dist/*.dmg
+            dist/*.pkg
+          if-no-files-found: error
+
+  check:
+    name: checksums and notes
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v7
+        with:
+          path: dist
+          merge-multiple: true
+      - run: |
+          version=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          echo "TAG=v$version" >> "$GITHUB_ENV"
+      - run: python3 packaging/release-names.py dist "$TAG"
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '4.0'
+      - name: sign and verify the checksums
+        env:
+          SPOTIFAST_UPDATE_SIGNING_KEY: ${{ secrets.SPOTIFAST_UPDATE_SIGNING_KEY }}
+        run: |
+          sed -i 's#https://github.com/crmne/spotifast#https://github.com/AleksandarPetrovv/spotifast#' Cargo.toml
+          gem install native-packages --version 0.11.0 --no-document
+          native-packages sign-checksums dist/checksums.txt --public-key assets/update-public-key.hex --key-env SPOTIFAST_UPDATE_SIGNING_KEY
+          native-packages verify-checksums dist/checksums.txt --public-key assets/update-public-key.hex
+      - name: every download in the notes was built
+        run: |
+          notes="packaging/release-notes/$TAG.md"
+          test -f "$notes" || { echo "missing $notes"; exit 1; }
+          grep -o "releases/download/$TAG/[^)]*" "$notes" | sed 's#.*/##' | while read -r file; do
+            test -f "dist/$file" || { echo "not built: $file"; exit 1; }
+          done
+          ls -la dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ env.TAG }}
+          path: dist/*
+          if-no-files-found: error

@@ -94,14 +94,6 @@ nfpm:
       - libstdc++
   rpm:
     buildhost: github-actions
-# Windows code and installers are signed through Azure Artifact Signing as
-# PlentyLabs when the windows-signing environment provides the account
-# (PACKAGING.md, "Windows signing").
-windows:
-  signing:
-    provider: azure-artifact-signing
-    description: Spotifast
-    publisher: PlentyLabs UG (haftungsbeschränkt) & Co. KG
 targets:
   macos-universal:
     platform: macos
