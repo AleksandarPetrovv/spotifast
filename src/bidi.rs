@@ -80,8 +80,26 @@ pub fn layout(
     max_rows: usize,
     overflow: Option<char>,
 ) -> Arc<Galley> {
+    layout_aligned(painter, text, font, color, wrap_width, max_rows, overflow, None)
+}
+
+/// [`layout`] with every row at `halign` instead of the text's own edge.
+#[allow(clippy::too_many_arguments)]
+pub fn layout_aligned(
+    painter: &Painter,
+    text: &str,
+    font: FontId,
+    color: Color32,
+    wrap_width: f32,
+    max_rows: usize,
+    overflow: Option<char>,
+    halign: Option<Align>,
+) -> Arc<Galley> {
     if !has_rtl(text) {
         let mut job = LayoutJob::simple(text.to_owned(), font, color, wrap_width);
+        if let Some(halign) = halign {
+            job.halign = halign;
+        }
         job.wrap.max_rows = max_rows;
         job.wrap.break_anywhere = false;
         job.wrap.overflow_character = overflow;
@@ -99,7 +117,9 @@ pub fn layout(
     };
     let rows = break_rows(text, wrap_width, max_rows, overflow, width);
     let mut job = LayoutJob::simple(rows.join("\n"), font, color, f32::INFINITY);
-    if text.split('\n').any(is_rtl) {
+    if let Some(halign) = halign {
+        job.halign = halign;
+    } else if text.split('\n').any(is_rtl) {
         job.halign = Align::RIGHT;
     }
     let mut galley = painter.layout_job(job);

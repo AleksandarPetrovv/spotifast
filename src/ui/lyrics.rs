@@ -11,6 +11,8 @@ use super::widgets;
 
 const LINE_SIZE: f32 = 19.0;
 const LINE_GAP: f32 = 10.0;
+/// The Hazy panel's font size grows with its width, between these.
+const HAZY_PANEL_SIZES: std::ops::RangeInclusive<f32> = 24.0..=44.0;
 /// Where the line being sung sits, as a fraction of the visible lyrics from
 /// the top: high up, so the lines to come fill most of the view.
 const SUNG_LINE_AT: f32 = 0.2;
@@ -20,20 +22,113 @@ const SUNG_LINE_GROWTH: f32 = 1.15;
 
 /// Scrolls so the middle of `line` sits `SUNG_LINE_AT` of the way down the
 /// visible lyrics.
-fn show_sung_line(ui: &egui::Ui, line: Rect, animation: Option<egui::style::ScrollAnimation>) {
-    let above = (ui.clip_rect().height() * SUNG_LINE_AT - line.height() / 2.0).max(0.0);
+fn show_sung_line(
+    ui: &egui::Ui,
+    line: Rect,
+    at: f32,
+    animation: Option<egui::style::ScrollAnimation>,
+) {
+    let above = (ui.clip_rect().height() * at - line.height() / 2.0).max(0.0);
     let target = Rect::from_min_max(pos2(line.left(), line.top() - above), line.max);
     match animation {
         Some(animation) => ui.scroll_to_rect_animation(target, Some(Align::Min), animation),
         None => ui.scroll_to_rect(target, Some(Align::Min)),
     }
 }
+/// Whether the view's height changed since it was last drawn here, as when
+/// the window changes size.
+fn view_resized(ctx: &egui::Context, key: &str, height: f32) -> bool {
+    let id = egui::Id::new(key);
+    let last = ctx.data_mut(|data| data.get_temp::<f32>(id));
+    ctx.data_mut(|data| data.insert_temp(id, height));
+    last.is_some_and(|last| (last - height).abs() > 1.0)
+}
+
 /// How long a line takes to light up or fade.
 const LIGHT_UP_SECONDS: f32 = 0.22;
 
 fn blend(from: egui::Color32, to: egui::Color32, t: f32) -> egui::Color32 {
     let t = t.clamp(0.0, 1.0);
     egui::Color32::from(egui::Rgba::from(from) * (1.0 - t) + egui::Rgba::from(to) * t)
+}
+
+/// Lyrics Plus look (Hazy): the line being sung sits in the middle of the view.
+const HAZY_SUNG_LINE_AT: f32 = 0.5;
+const HAZY_GROWTH: f32 = 1.05;
+const HAZY_FADE_SECONDS: f32 = 0.2;
+const HAZY_SCROLL_SECONDS: f32 = 0.35;
+/// Space between lines, as a fraction of the font size.
+const HAZY_LINE_GAP: f32 = 0.475;
+
+/// How bright a quiet line is, falling off with its distance from the line
+/// being sung (the stand-in for Lyrics Plus' blur).
+fn hazy_rest_alpha(distance: usize) -> f32 {
+    (0.6 - 0.1 * distance.saturating_sub(1) as f32).clamp(0.16, 0.6)
+}
+
+/// Lines away from the sung one; untimed words all read alike.
+fn hazy_distance(lyrics: &crate::lyrics::Lyrics, active: Option<usize>, index: usize) -> usize {
+    if !lyrics.synced {
+        return 1;
+    }
+    active.map_or(index + 1, |active| active.abs_diff(index))
+}
+
+/// One line in the Lyrics Plus look: bold, white, quieter the further it is
+/// from the sung line, which is drawn larger with a soft glow. The size
+/// change is a real font size, never a scale.
+fn hazy_line(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    text: &str,
+    size: f32,
+    distance: usize,
+    active: bool,
+    clickable: bool,
+) -> egui::Response {
+    let ctx = ui.ctx().clone();
+    let seconds = crate::motion::seconds(&ctx, HAZY_FADE_SECONDS);
+    let lit = ctx.animate_bool_with_time(id.with("lit"), active, seconds);
+    let target = if active { 1.0 } else { hazy_rest_alpha(distance) };
+    let alpha = ctx.animate_value_with_time(id.with("alpha"), target, seconds);
+    let width = ui.available_width();
+    let grown = 1.0 + (HAZY_GROWTH - 1.0) * lit;
+    let galley = crate::bidi::layout_aligned(
+        ui.painter(),
+        text,
+        theme::bold(size * grown),
+        Color32::WHITE,
+        width / HAZY_GROWTH * grown,
+        usize::MAX,
+        None,
+        Some(Align::Center),
+    );
+    let (rect, response) =
+        ui.allocate_exact_size(vec2(width, galley.size().y), Sense::click());
+    let response = if clickable {
+        response.on_hover_cursor(egui::CursorIcon::PointingHand)
+    } else {
+        response
+    };
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        let origin = crate::bidi::galley_pos(rect, &galley);
+        if lit > 0.01 {
+            for (radius, strength) in [(7.0, 0.05), (3.5, 0.09)] {
+                for step in 0..8 {
+                    let angle = step as f32 * std::f32::consts::TAU / 8.0;
+                    painter.galley_with_override_text_color(
+                        origin + vec2(angle.cos(), angle.sin()) * radius,
+                        galley.clone(),
+                        Color32::WHITE.gamma_multiply(strength * lit),
+                    );
+                }
+            }
+        }
+        painter.galley_with_override_text_color(origin, galley.clone(), Color32::WHITE.gamma_multiply(alpha));
+    }
+    ui.add_space(size * HAZY_LINE_GAP);
+    response
 }
 
 pub fn side_panel(app: &mut App, ui: &mut egui::Ui) {
@@ -210,11 +305,19 @@ fn contents(app: &mut App, ui: &mut egui::Ui) {
 
     let active = lyrics.active_line(now.position_ms);
     let romaji = crate::twerkz::ui::romaji_for(app, &now.uri, &lyrics);
-    let follow = app.lyrics_following && app.lyrics_line_shown != Some(active);
+    let hazy = app.settings.hazy_active();
+    let resized = hazy && view_resized(ui.ctx(), "lyrics-side-height", ui.clip_rect().height());
+    let follow = app.lyrics_following && (app.lyrics_line_shown != Some(active) || resized);
     // The line being sung is bold and in the accent colour; every other
     // line is quiet, regular text, the same before and after it has been
     // sung. A line takes 220 ms to light up or fade, as in omarchy-lyrics.
     let quiet = palette.text.gamma_multiply(0.45);
+    let at = if hazy { HAZY_SUNG_LINE_AT } else { SUNG_LINE_AT };
+    let snap = resized || app.lyrics_line_shown.is_none();
+    let scroll_animation =
+        (hazy && !snap).then(|| crate::motion::scroll(ui.ctx(), HAZY_SCROLL_SECONDS));
+    let hazy_size = (ui.available_width() * 0.075)
+        .clamp(*HAZY_PANEL_SIZES.start(), *HAZY_PANEL_SIZES.end());
     let scroll = crate::autoscroll::show(
         ui,
         egui::ScrollArea::vertical()
@@ -231,7 +334,11 @@ fn contents(app: &mut App, ui: &mut egui::Ui) {
                     Some(Align::Min),
                 );
             }
-            ui.add_space(12.0);
+            ui.add_space(if hazy && lyrics.synced {
+                (ui.clip_rect().height() * at).max(12.0)
+            } else {
+                12.0
+            });
             for (index, line) in lyrics.lines.iter().enumerate() {
                 let is_active = active == Some(index);
                 let lit = ui.ctx().animate_bool_with_time(
@@ -257,7 +364,17 @@ fn contents(app: &mut App, ui: &mut egui::Ui) {
                 } else {
                     Sense::hover()
                 };
-                let response = if crate::bidi::is_rtl(text) {
+                let response = if hazy {
+                    hazy_line(
+                        ui,
+                        egui::Id::new("lyric-line-hazy").with(index),
+                        text,
+                        hazy_size,
+                        hazy_distance(&lyrics, active, index),
+                        is_active && lyrics.synced,
+                        lyrics.synced,
+                    )
+                } else if crate::bidi::is_rtl(text) {
                     let galley = crate::bidi::layout(
                         ui.painter(),
                         text,
@@ -284,9 +401,11 @@ fn contents(app: &mut App, ui: &mut egui::Ui) {
                     app.lyrics_following = true;
                 }
                 if is_active && follow {
-                    show_sung_line(ui, rect, None);
+                    show_sung_line(ui, rect, at, scroll_animation);
                 }
-                ui.add_space(LINE_GAP);
+                if !hazy {
+                    ui.add_space(LINE_GAP);
+                }
             }
             // Words without timing can only be followed by the clock: sit
             // at the part of the text the song is probably at.
@@ -304,7 +423,7 @@ fn contents(app: &mut App, ui: &mut egui::Ui) {
                 );
             }
             // Room for the last line to rise to where a sung line sits.
-            ui.add_space((ui.clip_rect().height() * (1.0 - SUNG_LINE_AT)).max(60.0));
+            ui.add_space((ui.clip_rect().height() * (1.0 - at)).max(60.0));
         },
     );
     crate::autoscroll::lyrics(ui, scroll.id);
@@ -320,7 +439,11 @@ fn contents(app: &mut App, ui: &mut egui::Ui) {
 
 pub fn fullscreen(app: &mut App, ui: &mut egui::Ui) {
     egui::CentralPanel::default()
-        .frame(Frame::new().fill(theme::Palette::dark().window))
+        .frame(Frame::new().fill(if app.settings.hazy_active() {
+            Color32::TRANSPARENT
+        } else {
+            theme::Palette::dark().window
+        }))
         .show(ui, |ui| {
             let rect = ui.max_rect();
             background(app, ui, rect);
@@ -694,6 +817,10 @@ fn background(app: &mut App, ui: &mut egui::Ui, rect: Rect) {
     if milkdrop_backdrop(app, ui, rect) {
         return;
     }
+    // Hazy's own backdrop, drawn under the window, stays across the switch.
+    if app.settings.hazy_active() {
+        return;
+    }
     let art = app
         .now_playing()
         .and_then(|now| preferred_backdrop_art(now.art_small, now.art_url));
@@ -885,8 +1012,15 @@ fn fullscreen_contents(app: &mut App, ui: &mut egui::Ui) {
                 || (input.pointer.primary_down() && input.pointer.delta().y != 0.0)
         });
     let following = app.lyrics_following && !manual_scroll;
-    let follow = following && app.lyrics_line_shown != Some(active);
-    let animation = crate::motion::scroll(ui.ctx(), 0.45);
+    let hazy = app.settings.hazy_active();
+    let resized = hazy && view_resized(ui.ctx(), "lyrics-full-height", viewport.height());
+    let follow = following && (app.lyrics_line_shown != Some(active) || resized);
+    let at = if hazy { HAZY_SUNG_LINE_AT } else { SUNG_LINE_AT };
+    let animation = if hazy && (resized || app.lyrics_line_shown.is_none()) {
+        egui::style::ScrollAnimation::none()
+    } else {
+        crate::motion::scroll(ui.ctx(), if hazy { HAZY_SCROLL_SECONDS } else { 0.45 })
+    };
     let size = (ui.available_width() * 0.046).clamp(28.0, 42.0);
     // The line being sung takes the theme's accent, though the view is
     // always dark, and grows; each line wraps
@@ -921,8 +1055,8 @@ fn fullscreen_contents(app: &mut App, ui: &mut egui::Ui) {
             // the last to rise to it.
             let (padding, below) = if lyrics.synced {
                 (
-                    (viewport.height() * SUNG_LINE_AT - size).max(12.0),
-                    viewport.height() * (1.0 - SUNG_LINE_AT),
+                    (viewport.height() * at - size).max(12.0),
+                    viewport.height() * (1.0 - at),
                 )
             } else {
                 (12.0, 60.0)
@@ -966,7 +1100,19 @@ fn fullscreen_contents(app: &mut App, ui: &mut egui::Ui) {
                 let response = ui
                     .scope(|ui| {
                         ui.multiply_opacity(edge * edge * (3.0 - 2.0 * edge));
-                        ui.add(egui::Label::new(galley).sense(sense))
+                        if hazy {
+                            hazy_line(
+                                ui,
+                                egui::Id::new("lyric-line-hazy").with(("fullscreen", &now.uri, index)),
+                                text,
+                                size,
+                                hazy_distance(&lyrics, active, index),
+                                is_active && lyrics.synced,
+                                lyrics.synced,
+                            )
+                        } else {
+                            ui.add(egui::Label::new(galley).sense(sense))
+                        }
                     })
                     .inner;
                 let rect = response.rect;
@@ -978,9 +1124,11 @@ fn fullscreen_contents(app: &mut App, ui: &mut egui::Ui) {
                     app.actions.push(Action::FollowLyrics);
                 }
                 if is_active && follow {
-                    show_sung_line(ui, rect, Some(animation));
+                    show_sung_line(ui, rect, at, Some(animation));
                 }
-                ui.add_space(27.0);
+                if !hazy {
+                    ui.add_space(27.0);
+                }
             }
             // Words without timing can only be followed by the clock: sit
             // at the part of the text the song is probably at.
