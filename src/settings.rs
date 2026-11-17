@@ -47,8 +47,46 @@ impl LibrarySort {
 pub enum ThemeChoice {
     Dark,
     Light,
-    #[default]
     System,
+    /// The current cover, blurred, behind translucent panels.
+    #[default]
+    Hazy,
+}
+
+/// The Hazy theme's own options, edited from its pencil button.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HazySettings {
+    /// Show `background` instead of the playing song's cover.
+    pub custom_background: bool,
+    /// A picture file on this computer.
+    pub background: Option<String>,
+    /// Blur radius in points, 0 to 50.
+    pub blur: u8,
+    /// Percent, 0 to 200.
+    pub contrast: u8,
+    /// Percent, 0 to 200.
+    pub saturation: u8,
+    /// Percent, 0 to 200.
+    pub brightness: u8,
+    /// Use `color` as the accent instead of the cover's colour.
+    pub custom_color: bool,
+    pub color: [u8; 3],
+}
+
+impl Default for HazySettings {
+    fn default() -> Self {
+        Self {
+            custom_background: false,
+            background: None,
+            blur: 7,
+            contrast: 50,
+            saturation: 70,
+            brightness: 70,
+            custom_color: false,
+            color: [0x30, 0xbf, 0x63],
+        }
+    }
 }
 
 /// How the tray icon is drawn on Linux and Windows: in colour, or white or
@@ -176,6 +214,7 @@ impl ThemeChoice {
             Self::Dark => pgettext(locale, "theme", "Dark"),
             Self::Light => pgettext(locale, "theme", "Light"),
             Self::System => gettext(locale, "Follow system"),
+            Self::Hazy => pgettext(locale, "theme", "Hazy"),
         }
     }
 }
@@ -292,6 +331,7 @@ pub struct Settings {
     pub theme: ThemeChoice,
     /// The interface language; older files without it follow the system.
     pub language: LanguageChoice,
+    pub hazy: HazySettings,
     /// Filename selected from the local themes directory.
     pub custom_theme: Option<String>,
     /// Last accepted appearance, retained if its source file becomes unavailable.
@@ -507,7 +547,8 @@ impl Default for Settings {
             audio_buffer_ms: default_buffer_ms(),
             audio_cache: true,
             audio_cache_mb: 1024,
-            theme: ThemeChoice::System,
+            theme: ThemeChoice::Hazy,
+            hazy: HazySettings::default(),
             language: LanguageChoice::System,
             custom_theme: None,
             custom_theme_cache: None,
@@ -612,7 +653,16 @@ impl Settings {
 
     /// The one palette shown whatever the system's appearance: a chosen
     /// palette file, or Omarchy's while Follow system follows it.
+    pub(crate) fn hazy_active(&self) -> bool {
+        self.theme == ThemeChoice::Hazy && self.custom_theme.is_none()
+    }
+
     pub(crate) fn fixed_palette(&self) -> Option<crate::theme::Palette> {
+        if self.hazy_active() {
+            return Some(crate::theme::Palette::hazy(
+                self.hazy.custom_color.then_some(self.hazy.color),
+            ));
+        }
         let theme = if self.custom_theme.is_some() {
             self.custom_theme_cache.as_ref()
         } else if self.theme == ThemeChoice::System {
@@ -1033,10 +1083,10 @@ mod tests {
     #[test]
     fn new_profiles_follow_the_system_and_saved_choices_are_preserved() {
         use super::ThemeChoice;
-        assert_eq!(Settings::default().theme, ThemeChoice::System);
-        assert_eq!(ThemeChoice::default(), ThemeChoice::System);
+        assert_eq!(Settings::default().theme, ThemeChoice::Hazy);
+        assert_eq!(ThemeChoice::default(), ThemeChoice::Hazy);
         let empty: Settings = serde_json::from_str("{}").unwrap();
-        assert_eq!(empty.theme, ThemeChoice::System);
+        assert_eq!(empty.theme, ThemeChoice::Hazy);
         for (json, choice) in [("dark", ThemeChoice::Dark), ("light", ThemeChoice::Light)] {
             let settings: Settings =
                 serde_json::from_value(serde_json::json!({"theme": json, "volume": 37})).unwrap();

@@ -5,6 +5,7 @@
 pub mod covers;
 pub mod download;
 pub mod emoji;
+pub mod hazy;
 pub mod import;
 pub mod jobs;
 pub mod lyrics;

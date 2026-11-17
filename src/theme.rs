@@ -85,6 +85,34 @@ impl Palette {
         }
     }
 
+    /// The Hazy theme: panels are light veils over the blurred cover painted
+    /// behind them (see `twerkz::hazy`), so the fills are translucent. Menus
+    /// and dialogs stay solid.
+    pub fn hazy(accent: Option<[u8; 3]>) -> Self {
+        let [r, g, b] = accent.unwrap_or([0x30, 0xbf, 0x63]);
+        let accent = Color32::from_rgb(r, g, b);
+        Self {
+            dark: true,
+            window: Color32::from_rgb(0x0a, 0x0a, 0x0a),
+            panel: Color32::from_black_alpha(77),
+            surface: Color32::from_white_alpha(16),
+            surface_hover: Color32::from_white_alpha(30),
+            surface_active: Color32::from_white_alpha(44),
+            outline: Color32::from_white_alpha(28),
+            text: Color32::WHITE,
+            secondary: Color32::from_rgb(0xf0, 0xf0, 0xf0),
+            dim: Color32::from_rgb(0xb4, 0xb4, 0xb4),
+            accent,
+            accent_hover: accent.lerp_to_gamma(Color32::WHITE, 0.25),
+            on_accent: Color32::from_rgb(0x0a, 0x0a, 0x0a),
+            danger: Color32::from_rgb(0xf5, 0x71, 0x7f),
+            warning: Color32::from_rgb(0xf2, 0xb8, 0x5c),
+            overlay: Color32::from_rgb(0x1a, 0x1a, 0x1a),
+            shadow: Color32::from_black_alpha(140),
+            tint: Color32::TRANSPARENT,
+        }
+    }
+
     /// A colour derived from album art, softened so it can sit behind text.
     pub fn tint_from_art(&self, rgb: [u8; 3]) -> Color32 {
         let [r, g, b] = rgb.map(|c| c as f32 / 255.0);

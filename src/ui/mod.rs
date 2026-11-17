@@ -7,6 +7,7 @@ pub mod collection;
 pub(crate) mod devices;
 mod dialogs;
 pub(crate) mod friends;
+pub mod hazy;
 pub mod home;
 mod keys;
 pub mod library;
@@ -39,6 +40,7 @@ use crate::theme::{self, Icon};
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
     let ctx = &ctx;
+    crate::twerkz::hazy::paint(app, ui);
     keys::handle(app, ctx);
     for path in winamp::dropped_skins(ctx) {
         app.actions.push(Action::InstallSkin(path));
@@ -112,6 +114,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     keep_room_for_panels(app, ctx);
     devices::popup(app, ctx);
     dialogs::show(app, ctx);
+    hazy::show(app, ctx);
     update::show(app, ctx);
     widgets::drag_ghost(ctx, &app.palette, app.locale);
     crate::twerkz::ui::panel(app, ctx);
@@ -304,9 +307,10 @@ fn page_tint(app: &mut App) -> Option<Color32> {
 
 fn central(app: &mut App, ui: &mut egui::Ui) {
     let palette = app.palette;
-    let tint = page_tint(app);
+    let hazy = app.settings.hazy_active();
+    let tint = if hazy { None } else { page_tint(app) };
     egui::CentralPanel::default()
-        .frame(Frame::new().fill(palette.window))
+        .frame(Frame::new().fill(if hazy { Color32::TRANSPARENT } else { palette.window }))
         .show(ui, |ui| {
             let rect = ui.max_rect();
             let page = app.page().clone();

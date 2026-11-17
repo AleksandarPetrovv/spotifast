@@ -221,7 +221,7 @@ fn slider_value_style(style: &mut egui::Style, palette: &Palette) {
 /// A settings slider with its value box beside it, where egui's own slider
 /// would put it. The two are drawn apart so each keeps its own rounding;
 /// `slider` and `value` set up each part for `number` over `range`.
-fn setting_slider<N: egui::emath::Numeric>(
+pub(super) fn setting_slider<N: egui::emath::Numeric>(
     ui: &mut egui::Ui,
     palette: &Palette,
     number: &mut N,
@@ -1447,6 +1447,16 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                             .selected_text(selected.as_ref())
                             .width(200.0_f32.min(ui.available_width()))
                             .show_ui(ui, |ui| {
+                                if ui
+                                    .selectable_label(
+                                        app.settings.hazy_active(),
+                                        ThemeChoice::Hazy.label(locale).as_ref(),
+                                    )
+                                    .clicked()
+                                {
+                                    app.actions.push(Action::SetTheme(ThemeChoice::Hazy));
+                                }
+                                ui.separator();
                                 for choice in ThemeChoice::ALL {
                                     if ui
                                         .selectable_label(

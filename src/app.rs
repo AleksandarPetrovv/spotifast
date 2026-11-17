@@ -406,6 +406,7 @@ pub struct App {
     /// from. Finding the file touches the disk and the controls are synced
     /// every frame, so the answer is kept until the artwork changes.
     media_art: Option<(String, PathBuf)>,
+    pub hazy: crate::twerkz::hazy::Backdrop,
     tray: Option<fastframe_tray::Tray>,
     /// A hidden start's deadline for a panel to show the tray item: a start
     /// at login can beat the desktop's tray host, and without one by then
@@ -1297,6 +1298,7 @@ impl App {
             #[cfg(target_os = "linux")]
             system_appearance,
             media_art: None,
+            hazy: Default::default(),
             tray,
             tray_wait: None,
             autostart: None,
@@ -3223,6 +3225,14 @@ impl App {
                         } else {
                             self.toast(gettext(self.locale, "That folder is already listed."));
                         }
+                    }
+                }
+                Event::HazyBackgroundChosen { result } => {
+                    if let Some(path) = result {
+                        let mut hazy = self.settings.hazy.clone();
+                        hazy.background = Some(path.to_string_lossy().into_owned());
+                        hazy.custom_background = true;
+                        self.actions.push(Action::SetHazy(hazy));
                     }
                 }
                 Event::RemoteChanged => {
@@ -5845,7 +5855,7 @@ impl App {
             };
         }
         match self.settings.theme {
-            ThemeChoice::Dark => egui::ThemePreference::Dark,
+            ThemeChoice::Dark | ThemeChoice::Hazy => egui::ThemePreference::Dark,
             ThemeChoice::Light => egui::ThemePreference::Light,
             ThemeChoice::System => egui::ThemePreference::System,
         }
@@ -15341,6 +15351,13 @@ impl App {
             Action::AddLocalFolder => {
                 self.backend.choose_local_folder();
             }
+            Action::SetHazy(hazy) => {
+                if self.settings.hazy != hazy {
+                    self.settings.hazy = hazy;
+                    self.mark_settings_dirty();
+                }
+            }
+            Action::ChooseHazyBackground => self.backend.choose_hazy_background(),
             Action::RescanLocalFiles => {
                 if !self.local_files_scanning {
                     self.local_files_scanning = true;
@@ -26416,6 +26433,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut app = test_app("theme-reveal");
         app.reveal_theme_changes = true;
+        app.settings.theme = ThemeChoice::System;
         let frame = |app: &mut App, time: f64| {
             let mut output = ctx.run_ui(
                 egui::RawInput {
@@ -26745,6 +26763,7 @@ mod tests {
         app.backend.shutdown();
         let ctx = egui::Context::default();
         app.settings = Settings::default();
+        app.settings.theme = ThemeChoice::System;
         app.window_hidden = true;
         app.resume_track = Some("spotify:track:playing".into());
         app.resume_position_ms = 123_000;

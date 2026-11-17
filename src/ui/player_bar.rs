@@ -45,7 +45,12 @@ pub(crate) fn end_tint_session(ctx: &egui::Context) {
 
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let palette = app.palette;
-    let fill = eased_fill(ui.ctx(), palette.panel, app.now_playing_tint());
+    let tint = if app.settings.hazy_active() {
+        None
+    } else {
+        app.now_playing_tint()
+    };
+    let fill = eased_fill(ui.ctx(), palette.panel, tint);
     egui::Panel::bottom("player-bar")
         .exact_size(theme::PLAYER_BAR_HEIGHT)
         .resizable(false)

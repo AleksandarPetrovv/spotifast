@@ -2593,6 +2593,11 @@ msgctxt "theme"
 msgid "Light"
 msgstr ""
 
+#: src/settings.rs:217
+msgctxt "theme"
+msgid "Hazy"
+msgstr ""
+
 #: src/settings.rs:174
 msgid "Follow system"
 msgstr ""
@@ -3643,14 +3648,6 @@ msgstr ""
 msgid "MilkDrop visualiser (Cmd+Shift+K)"
 msgstr ""
 
-#: src/ui/topbar.rs:589
-msgid "Mini player (Ctrl+M)"
-msgstr ""
-
-#: src/ui/topbar.rs:590
-msgid "Mini player (Cmd+Shift+M)"
-msgstr ""
-
 #: src/ui/topbar.rs:602
 msgid "Updating your library…"
 msgstr ""
@@ -4029,4 +4026,44 @@ msgid ""
 "Spotifast needs a graphics driver with OpenGL 2.0 or newer, and this PC or "
 "virtual machine does not provide one. Install the graphics driver, or turn "
 "on GPU acceleration for the virtual machine. Open {url} to read more?"
+msgstr ""
+
+#: src/ui/topbar.rs
+msgid "Edit Theme"
+msgstr ""
+
+#: src/ui/sidebar.rs
+msgid "Filter Your Library"
+msgstr ""
+
+#: src/ui/hazy.rs
+msgid "Custom Background"
+msgstr ""
+
+#: src/ui/hazy.rs
+msgid "Choose Image…"
+msgstr ""
+
+#: src/ui/hazy.rs
+msgid "Blur"
+msgstr ""
+
+#: src/ui/hazy.rs
+msgid "Contrast"
+msgstr ""
+
+#: src/ui/hazy.rs
+msgid "Saturation"
+msgstr ""
+
+#: src/ui/hazy.rs
+msgid "Brightness"
+msgstr ""
+
+#: src/ui/hazy.rs
+msgid "Custom Color"
+msgstr ""
+
+#: src/ui/hazy.rs
+msgid "Reset"
 msgstr ""

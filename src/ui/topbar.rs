@@ -12,7 +12,7 @@ use crate::theme::{self, Icon, Palette};
 
 /// The gap the bar keeps between everything it lays out.
 const ITEM_SPACING: f32 = 8.0;
-/// The account avatar, and the icon in each of the three buttons beside it.
+/// The account avatar, and the icon in each of the buttons beside it.
 const AVATAR_SIZE: f32 = 36.0;
 const ICON_BUTTON_ICON: f32 = 19.0;
 /// `theme::icon_button` pads its icon by 12 px.
@@ -34,12 +34,13 @@ const SEARCH_FLOOR: f32 = 130.0;
 // Keep the original 80-point minimum inside the page's own toolbar.
 const SEARCH_MIN: f32 = 80.0;
 /// Everything at the right end whose width never changes: the page padding,
-/// the avatar, the gap the account menu leaves, the three icon buttons, and
-/// the spacing between them. The cursor stops at the left edge of the last
-/// button, so this counts three gaps, not four. The spinner and the badges
-/// are measured on top of it because they come and go.
+/// the avatar, the gap the account menu leaves, the settings and visualiser
+/// buttons, and the spacing between them. The cursor stops at the left edge
+/// of the last button, so this counts two gaps, not three. The theme button,
+/// the spinner and the badges are measured on top of it because they come
+/// and go.
 const RIGHT_CONTROLS_WIDTH: f32 =
-    super::widgets::PAGE_PADDING + AVATAR_SIZE + 4.0 + 3.0 * ICON_BUTTON_SIZE + 3.0 * ITEM_SPACING;
+    super::widgets::PAGE_PADDING + AVATAR_SIZE + 4.0 + 2.0 * ICON_BUTTON_SIZE + 2.0 * ITEM_SPACING;
 
 /// What precedes the field until the bar has drawn once: the page padding,
 /// the back and forward buttons and the gaps after them.
@@ -54,7 +55,8 @@ fn lead_id() -> egui::Id {
 /// The narrowest the bar, and so the page under it, can be before its
 /// controls run into each other: the narrowest field, with the spinner and
 /// both badges as icons. Counting them even while they are away keeps the
-/// panels and the window from changing width as they come and go.
+/// panels and the window from changing width as they come and go. The theme
+/// button counts too.
 pub fn least_width(ctx: &egui::Context) -> f32 {
     let lead = ctx
         .data(|data| data.get_temp(lead_id()))
@@ -65,6 +67,8 @@ pub fn least_width(ctx: &egui::Context) -> f32 {
 fn least_width_after(lead: f32) -> f32 {
     lead + SEARCH_MIN
         + RIGHT_CONTROLS_WIDTH
+        + ICON_BUTTON_SIZE
+        + ITEM_SPACING
         + SPINNER_SIZE
         + ITEM_SPACING
         + 2.0 * (ITEM_SPACING + BADGE_CHIP)
@@ -338,6 +342,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 } else {
                     0.0
                 }
+                + if app.settings.hazy_active() {
+                    ICON_BUTTON_SIZE + ITEM_SPACING
+                } else {
+                    0.0
+                }
                 + if busy {
                     SPINNER_SIZE + ITEM_SPACING
                 } else {
@@ -559,6 +568,23 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 {
                     app.actions.push(Action::Open(Page::Settings));
                 }
+                if app.settings.hazy_active()
+                    && theme::icon_button(
+                        ui,
+                        Icon::Pencil,
+                        ICON_BUTTON_ICON,
+                        if super::hazy::is_open(ui.ctx()) {
+                            palette.accent
+                        } else {
+                            palette.secondary
+                        },
+                        palette.text,
+                        &gettext(locale, "Edit Theme"),
+                    )
+                    .clicked()
+                {
+                    super::hazy::open(ui.ctx());
+                }
                 if app.visualizers_available()
                     && theme::icon_button(
                         ui,
@@ -578,21 +604,6 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     .clicked()
                 {
                     app.actions.push(Action::ToggleWinampMilkdrop);
-                }
-                if theme::icon_button(
-                    ui,
-                    Icon::Shrink,
-                    ICON_BUTTON_ICON,
-                    palette.secondary,
-                    palette.text,
-                    super::keys::platform_shortcut(
-                        &gettext(locale, "Mini player (Ctrl+M)"),
-                        &gettext(locale, "Mini player (Cmd+Shift+M)"),
-                    ),
-                )
-                .clicked()
-                {
-                    app.actions.push(Action::ToggleWinampWindow);
                 }
                 // A quiet spinner once the app has been at something in the
                 // background for a while, long enough that fast requests
@@ -735,7 +746,7 @@ mod topbar_fit_tests {
     fn the_least_width_holds_every_control_beside_the_field() {
         let lead = LEAD_GUESS;
         let room = least_width_after(lead) - lead;
-        let controls = RIGHT_CONTROLS_WIDTH + SPINNER_SIZE + ITEM_SPACING;
+        let controls = RIGHT_CONTROLS_WIDTH + ICON_BUTTON_SIZE + ITEM_SPACING + SPINNER_SIZE + ITEM_SPACING;
         let fit = topbar_fit(room, controls, DEVICE + UPDATE, CHIP * 2.0);
         assert!(!fit.labels);
         assert_eq!(fit.search, SEARCH_MIN);

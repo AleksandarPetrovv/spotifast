@@ -738,6 +738,10 @@ pub enum Command {
         selected:
             std::pin::Pin<Box<dyn std::future::Future<Output = Option<rfd::FileHandle>> + Send>>,
     },
+    ChooseHazyBackground {
+        selected:
+            std::pin::Pin<Box<dyn std::future::Future<Output = Option<rfd::FileHandle>> + Send>>,
+    },
     /// Start (or restart) the Web API sign-in in the browser.
     SignIn {
         request: u64,
@@ -1147,6 +1151,9 @@ pub enum Event {
     LocalFolderChosen {
         result: Option<std::path::PathBuf>,
     },
+    HazyBackgroundChosen {
+        result: Option<std::path::PathBuf>,
+    },
     /// OS reports network reachability changed.
     NetworkStatus(bool),
     AccountCaches {
@@ -1413,6 +1420,16 @@ impl Backend {
             .set_title("Choose a folder with local music")
             .pick_folder();
         self.send(Command::ChooseLocalFolder {
+            selected: Box::pin(selected),
+        });
+    }
+
+    pub fn choose_hazy_background(&self) {
+        let selected = rfd::AsyncFileDialog::new()
+            .set_title("Choose a background image")
+            .add_filter("Image", &["jpg", "jpeg", "png", "webp", "bmp", "gif"])
+            .pick_file();
+        self.send(Command::ChooseHazyBackground {
             selected: Box::pin(selected),
         });
     }
@@ -2399,6 +2416,15 @@ impl Worker {
                     tokio::spawn(async move {
                         let result = selected.await.map(|file| file.path().to_path_buf());
                         let _ = events.send(Event::LocalFolderChosen { result });
+                        waker.wake();
+                    });
+                }
+                Command::ChooseHazyBackground { selected } => {
+                    let events = self.events.clone();
+                    let waker = self.waker.clone();
+                    tokio::spawn(async move {
+                        let result = selected.await.map(|file| file.path().to_path_buf());
+                        let _ = events.send(Event::HazyBackgroundChosen { result });
                         waker.wake();
                     });
                 }

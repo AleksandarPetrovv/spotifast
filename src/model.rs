@@ -1266,6 +1266,8 @@ pub enum Action {
     },
     ShowDialog(Dialog),
     CloseDialog,
+    SetHazy(crate::settings::HazySettings),
+    ChooseHazyBackground,
     CreatePlaylist {
         name: String,
         public: bool,

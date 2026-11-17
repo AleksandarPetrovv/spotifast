@@ -7055,6 +7055,7 @@ mod tests {
     #[test]
     fn custom_theme_picker_applies_the_clicked_palette_and_exposes_its_name_and_value() {
         let (ctx, mut app) = accessible_app("custom-theme-picker");
+        app.settings.theme = crate::settings::ThemeChoice::System;
         app.open(Page::Settings);
         ctx.data_mut(|data| {
             data.insert_temp(egui::Id::new("settings-filter"), "Appearance".to_string())
@@ -7177,6 +7178,7 @@ mod tests {
     fn follow_system_offers_a_light_and_a_dark_theme_of_their_own_base() {
         let (ctx, mut app) = accessible_app("theme-pair-picker");
         app.backend.shutdown();
+        app.settings.theme = crate::settings::ThemeChoice::System;
         app.open(Page::Settings);
         ctx.data_mut(|data| {
             data.insert_temp(egui::Id::new("settings-filter"), "Appearance".to_string())
@@ -9014,6 +9016,7 @@ mod tests {
     fn the_sung_line_sits_high_in_the_lyrics() {
         for fullscreen in [false, true] {
             let (ctx, mut app) = accessible_app(&format!("sung-line-{fullscreen}"));
+            app.settings.theme = crate::settings::ThemeChoice::Dark;
             app.show_lyrics_panel = true;
             app.lyrics_fullscreen = Some(fullscreen);
             app.lyrics = Loadable::Loaded(Some(sample_lyrics()));
@@ -9182,6 +9185,7 @@ mod tests {
         app.lyrics_fullscreen = Some(false);
         app.lyrics = Loadable::Loaded(Some(sample_lyrics()));
         app.lyrics_following = false;
+        app.settings.theme = crate::settings::ThemeChoice::Light;
         // Light differs from the dark palette this view is always drawn in.
         let accent = crate::theme::Palette::light().accent;
         ctx.set_theme(egui::Theme::Light);
