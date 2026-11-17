@@ -29,6 +29,42 @@ pub enum After {
     Nothing,
 }
 
+/// Soloist's queue with the playlist's local songs put back between the
+/// Spotify songs around them. `rows` follow `current` in `order`; `parked`
+/// is the Spotify song Soloist waits on during an interlude, shown first when
+/// it comes after `current`. Rows that stop following `order` stay as they are.
+pub fn splice_locals(
+    order: &[String],
+    current: &str,
+    parked: Option<&str>,
+    rows: &[String],
+    wrap: bool,
+) -> Option<Vec<String>> {
+    let n = order.len();
+    let mut at = order.iter().position(|u| u == current)?;
+    let parked = parked.filter(|p| order.iter().position(|u| u == p).is_some_and(|i| i > at));
+    let mut out = Vec::new();
+    let songs: Vec<&str> = parked.into_iter().chain(rows.iter().map(String::as_str)).collect();
+    for (k, song) in songs.iter().enumerate() {
+        let found = (1..=n)
+            .map(|step| at + step)
+            .take_while(|&i| wrap || i < n)
+            .find(|&i| order[i % n] == *song);
+        let Some(i) = found else {
+            out.extend(songs[k..].iter().map(|s| s.to_string()));
+            return Some(out);
+        };
+        out.extend((at + 1..i).map(|j| &order[j % n]).filter(|u| is_local(u)).cloned());
+        out.push(song.to_string());
+        at = i % n;
+    }
+    // Local songs that end the list play after the last Spotify song.
+    if !wrap && order[at + 1..].iter().all(|u| is_local(u)) {
+        out.extend(order[at + 1..].iter().cloned());
+    }
+    Some(out)
+}
+
 /// The consecutive local songs from `from` in `order`, and the first
 /// non-local song after them.
 pub fn local_run(order: &[String], from: usize) -> (Vec<String>, Option<String>) {
@@ -285,6 +321,29 @@ mod tests {
         let order = v(&["s1", L1, L2, "s2", L1]);
         assert_eq!(local_run(&order, 1), (v(&[L1, L2]), Some("s2".into())));
         assert_eq!(local_run(&order, 4), (v(&[L1]), None));
+    }
+
+    #[test]
+    fn splice_puts_locals_back_between_spotify_songs() {
+        let order = v(&["s1", L1, "s2", L2, "s3", L1]);
+        let rows = v(&["s2", "s3"]);
+        assert_eq!(
+            splice_locals(&order, "s1", None, &rows, false),
+            Some(v(&[L1, "s2", L2, "s3", L1]))
+        );
+        // During an interlude on L2, Soloist waits on s3 and queues nothing more.
+        assert_eq!(
+            splice_locals(&order, L2, Some("s3"), &[], false),
+            Some(v(&["s3", L1]))
+        );
+        // Parked on the song before the interlude: not shown again.
+        assert_eq!(splice_locals(&order, L1, Some("s1"), &v(&["s2"]), false), Some(v(&["s2"])));
+        // Repeat all goes round, and a row off the list ends the splicing.
+        assert_eq!(
+            splice_locals(&order, "s3", None, &v(&["s1", "x", "s2"]), true),
+            Some(v(&[L1, "s1", "x", "s2"]))
+        );
+        assert_eq!(splice_locals(&order, "nope", None, &rows, false), None);
     }
 
     #[test]

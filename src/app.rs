@@ -8856,6 +8856,7 @@ impl App {
                 self.queue = Loadable::from_result(result);
                 self.hide_skipped_rows();
                 self.reconcile_pending_queue();
+                self.show_context_locals();
                 if let Some(queue) = self.queue.get() {
                     let uris: Vec<String> = queue
                         .queue
@@ -11966,6 +11967,55 @@ impl App {
             if let Some(at) = queue.queue.iter().position(|item| item.uri() == uri) {
                 queue.queue.remove(at);
             }
+        }
+    }
+
+    /// Soloist's queue leaves out the playing playlist's local songs, which
+    /// the built-in player plays between its songs: show them at their places.
+    fn show_context_locals(&mut self) {
+        use crate::twerkz::mixed::{is_local, splice_locals};
+        if !self.mixed_active() || self.playing_context_shuffle() {
+            return;
+        }
+        let Some(id) = self.mixed_playlist_id() else {
+            return;
+        };
+        let order = self.playlist_order(&id);
+        let Some(current) = self.current_track_uri() else {
+            return;
+        };
+        if !order.iter().any(|uri| is_local(uri)) {
+            return;
+        }
+        let queued = self.queued_rows_len();
+        let wrap = self.mixed_repeat() == RepeatMode::Context;
+        let Some(page) = self.playlist_pages.get(&id) else {
+            return;
+        };
+        let Loadable::Loaded(queue) = &mut self.queue else {
+            return;
+        };
+        let parked = queue.currently_playing.clone().filter(|item| item.uri() != current);
+        let rows: Vec<String> = queue.queue[queued..].iter().map(|item| item.uri().to_string()).collect();
+        let Some(spliced) = splice_locals(&order, &current, parked.as_ref().map(PlayableItem::uri), &rows, wrap)
+        else {
+            return;
+        };
+        let mut fetched = queue.queue.split_off(queued).into_iter().peekable();
+        for uri in spliced {
+            let item = if fetched.peek().is_some_and(|item| item.uri() == uri) {
+                fetched.next()
+            } else if parked.as_ref().is_some_and(|item| item.uri() == uri) {
+                parked.clone()
+            } else {
+                page.items
+                    .items
+                    .iter()
+                    .filter_map(PlaylistItem::playable)
+                    .find(|item| item.uri() == uri)
+                    .cloned()
+            };
+            queue.queue.extend(item);
         }
     }
 
