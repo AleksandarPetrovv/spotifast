@@ -57,8 +57,8 @@ jobs:
 
   macos:
     name: macos universal
-    runs-on: macos-latest
-    steps:
+    runs-on: macos-15
+    steps: &macos_steps
       - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref }}
@@ -90,9 +90,20 @@ jobs:
             dist/*.pkg
           if-no-files-found: error
 
+  # GitHub sometimes has no macOS machine to give ("The job was not
+  # acquired by Runner") and cancels the job after 15 minutes without a
+  # step. The build is universal either way, so an Intel machine retries it.
+  macos_intel:
+    name: macos universal (intel retry)
+    needs: macos
+    if: ${{ !cancelled() && needs.macos.result == 'cancelled' }}
+    runs-on: macos-15-intel
+    steps: *macos_steps
+
   check:
     name: checksums and notes
-    needs: [windows, macos]
+    needs: [windows, macos, macos_intel]
+    if: ${{ !cancelled() && needs.windows.result == 'success' && (needs.macos.result == 'success' || needs.macos_intel.result == 'success') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
