@@ -4375,7 +4375,13 @@ impl App {
         if now.local {
             self.last_now_playing_sequence = self.local.track_sequence;
         }
-        self.resume_context = self.playing_context_uri();
+        // A state that arrives without a context (Spotify lags a song behind)
+        // must not wipe the playlist the run was in; only a request for a
+        // context-less play (assumed context) ends it.
+        let known = self.playing_context_uri();
+        if known.is_some() || self.assumed_context.is_some() {
+            self.resume_context = known;
+        }
         self.resume_track = Some(now.uri.clone());
         self.resume_position_ms = 0;
         if now.local
@@ -28212,6 +28218,20 @@ mod tests {
             app.last_session_save.elapsed() < SESSION_REFRESH,
             "saved again"
         );
+    }
+
+    #[test]
+    fn a_song_change_without_a_context_keeps_the_remembered_playlist() {
+        let mut app = headless_app();
+        app.resume_context = Some("spotify:playlist:pl1".into());
+        app.local.playback = Playback::Playing;
+        app.local.track = Some(crate::player::LocalTrack {
+            uri: "spotify:track:next".into(),
+            ..Default::default()
+        });
+        app.on_now_playing_changed();
+        assert_eq!(app.resume_track.as_deref(), Some("spotify:track:next"));
+        assert_eq!(app.resume_context.as_deref(), Some("spotify:playlist:pl1"));
     }
 
     /// eframe runs only the logic of a hidden, minimised or occluded window,
