@@ -1400,6 +1400,7 @@ pub enum Action {
         playlist_order: Option<Vec<String>>,
     },
     SetSoloist(bool),
+    SetMixedPlayback(bool),
     RetrySoloist,
     StartSoloistSetup,
     EnableSoloist,

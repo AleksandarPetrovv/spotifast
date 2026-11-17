@@ -267,6 +267,8 @@ impl SlowAppBanner {
 pub struct Settings {
     /// Run the optional, separately downloaded Spotify Soloist player.
     pub soloist_enabled: bool,
+    /// With Soloist on, local files play on the built-in player in between.
+    pub mixed_playback: bool,
     /// The Spotify Connect name other devices see.
     pub device_name: String,
     /// 96, 160, or 320 kbps.
@@ -495,6 +497,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             soloist_enabled: false,
+            mixed_playback: false,
             device_name: "Spotifast".to_string(),
             bitrate: 320,
             normalisation: false,

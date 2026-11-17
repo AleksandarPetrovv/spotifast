@@ -715,8 +715,7 @@ pub fn prepare_table_view(
     let cached = ui.data(|d| d.get_temp::<Arc<TableCache>>(cache_id));
     let order = plays_order(app, items, sort);
 
-    let local_playable = !app.settings.local_folders.is_empty()
-        && !matches!(app.target(), crate::app::Target::Remote(Some(_)));
+    let local_playable = app.plays_local_files();
     let is_valid = cached.as_ref().is_some_and(|c| {
         c.sort == sort
             && c.plays_shown_rows == plays_shown_rows
@@ -1256,7 +1255,7 @@ fn list_shortcuts(
                 .collect(),
         });
     }
-    if play_next && queueable && app.queue_locally_reorderable() {
+    if play_next && picked_songs.iter().any(|song| app.can_play_next(song.uri())) {
         app.actions.push(Action::PlayNext {
             items: picked_songs.clone(),
         });

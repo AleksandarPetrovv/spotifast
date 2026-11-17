@@ -787,9 +787,10 @@ const VERSION: usize = 2;
 const QUALITY: usize = 3;
 const ACCESS: usize = 4;
 const TURN_OFF: usize = 5;
+const MIXED: usize = 6;
 
 /// What the Settings section's rows say, for drawing and for searching.
-pub(super) fn rows(app: &App) -> [RowText<'static>; 6] {
+pub(super) fn rows(app: &App) -> [RowText<'static>; 7] {
     let locale = app.locale;
     let enabled = app.settings.soloist_enabled;
     let supported = crate::soloist::install::supported();
@@ -835,6 +836,14 @@ pub(super) fn rows(app: &App) -> [RowText<'static>; 6] {
             gettext(
                 locale,
                 "Go back to the built-in player. Your key stays saved.",
+            ),
+        )
+        .when(enabled),
+        RowText::new(
+            gettext(locale, "Play Local Files on the Built-in Player"),
+            gettext(
+                locale,
+                "Spotify songs play on Soloist so they count toward your listening history; local files play on the built-in player in between.",
             ),
         )
         .when(enabled),
@@ -901,7 +910,7 @@ pub(super) fn settings(
     ui: &mut egui::Ui,
     needle: &str,
     section: &str,
-    rows: &[RowText<'static>; 6],
+    rows: &[RowText<'static>; 7],
 ) {
     let palette = app.palette;
     let locale = app.locale;
@@ -923,6 +932,13 @@ pub(super) fn settings(
     filtered_note(ui, &palette, needle, section, &rows[QUALITY]);
     filtered_row(ui, &palette, needle, section, &rows[ACCESS], |ui| {
         super::settings::spotify_access_control(app, ui);
+    });
+    filtered_row(ui, &palette, needle, section, &rows[MIXED], |ui| {
+        let mut on = app.settings.mixed_playback;
+        let label = gettext(locale, "Play Local Files on the Built-in Player");
+        if super::widgets::switch(ui, &palette, &label, &mut on).changed() {
+            app.actions.push(Action::SetMixedPlayback(on));
+        }
     });
     filtered_row(ui, &palette, needle, section, &rows[TURN_OFF], |ui| {
         if theme::pill_button(ui, &palette, &gettext(locale, "Turn off"), false).clicked() {

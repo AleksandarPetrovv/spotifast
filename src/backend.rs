@@ -698,6 +698,9 @@ pub enum Command {
         key: Option<String>,
     },
     SoloistDevice(Option<crate::api::models::Device>),
+    SoloistPauseOnTrack(bool),
+    /// Queued songs to skip when Soloist reaches them, one use each.
+    SoloistSkipOnTrack(Vec<String>),
     SoloistUpdate {
         generation: u64,
         update: crate::soloist::Update,
@@ -2270,6 +2273,16 @@ impl Worker {
                         soloist.client.bind(device);
                     }
                 }
+                Command::SoloistPauseOnTrack(armed) => {
+                    if let Some(soloist) = &self.soloist {
+                        soloist.client.pause_on_next_track(armed);
+                    }
+                }
+                Command::SoloistSkipOnTrack(uris) => {
+                    if let Some(soloist) = &self.soloist {
+                        soloist.client.skip_on_tracks(uris);
+                    }
+                }
                 Command::SoloistUpdate { generation, update } => {
                     if generation == self.soloist_generation {
                         self.emit(Event::Soloist(update));
@@ -2447,7 +2460,7 @@ impl Worker {
                 }
                 Command::ApplyProxy { request, config } => self.change_proxy(request, config, None),
                 Command::Player(command) => {
-                    if matches!(&command, PlayerCommand::Load(_)) {
+                    if command.replaces_playback() {
                         self.resume = None;
                     }
                     match &self.engine {
@@ -2467,7 +2480,7 @@ impl Worker {
                         None if command == PlayerCommand::Toggle
                             && self.kept_player.as_ref().is_some_and(KeptPlayer::toggle) => {}
                         None => {
-                            if matches!(&command, PlayerCommand::Load(_)) {
+                            if command.replaces_playback() {
                                 // Something else chosen: the old song stops.
                                 self.stop_kept_player();
                             }

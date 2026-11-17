@@ -146,10 +146,109 @@ pub enum Update {
     Audio(bool),
     OutputVolume,
     Changed { queue: bool },
+    /// A new song started; `paused` when the armed pause already stopped it at 0.
+    Track { uri: String, paused: bool },
+    /// A removed queued song started and was skipped at once.
+    Skipped { uri: String },
+    /// An armed pause stopped Soloist just before `uri` ended, so its next
+    /// song never started.
+    Ending { uri: String },
+    /// Soloist ran out of songs and went idle after playing one.
+    Idle,
     UpdateReady(String),
     UpdateFailed,
 }
 pub type Notify = Arc<dyn Fn(Update) + Send + Sync>;
+
+/// Stops this long before the song ends: before Soloist starts its next
+/// song, cutting only the song's silent tail.
+const END_MARGIN: Duration = Duration::from_millis(150);
+/// How long after the end-of-song pause a song change still counts as
+/// Soloist having raced past it.
+const PARKED_RACE: Duration = Duration::from_millis(800);
+
+/// How long until a song at `position_ms` (as of `at_ms`, wall clock, `0` when
+/// unknown) is `END_MARGIN` from its end. `None` while it is not moving.
+fn time_to_end(
+    position_ms: u64,
+    at_ms: u64,
+    now_ms: u64,
+    speed: f64,
+    duration_ms: u64,
+) -> Option<Duration> {
+    if speed <= 0.0 || duration_ms == 0 {
+        return None;
+    }
+    let elapsed = if at_ms == 0 { 0 } else { now_ms.saturating_sub(at_ms) };
+    let played = position_ms as f64 + elapsed as f64 * speed;
+    let left = (duration_ms as f64 - played) / speed - END_MARGIN.as_millis() as f64;
+    Some(Duration::from_millis(left.max(0.0) as u64))
+}
+
+/// The song a track_changed, playback_state or playback_changed message reports.
+fn started_track(message: &serde_json::Value) -> Option<&str> {
+    matches!(
+        message["type"].as_str()?,
+        "track_changed" | "playback_state" | "playback_changed"
+    )
+    .then(|| message["item"]["uri"].as_str())
+    .flatten()
+    .filter(|uri| !uri.is_empty())
+}
+
+/// A song message that puts the same song back at its start after the
+/// position last seen was at its end: repeat restarting it, which carries no
+/// change of uri. A seek or a Previous mid-song is not that.
+fn replayed(message: &serde_json::Value, last_position_ms: u64) -> bool {
+    const START_MS: u64 = 2_000;
+    const END_MS: u64 = 10_000;
+    let duration = message["item"]["decorations"]["playback"]["duration_ms"]
+        .as_u64()
+        .unwrap_or(0);
+    started_track(message).is_some()
+        && message["position"]["position_ms"].as_u64().is_some_and(|ms| ms <= START_MS)
+        && duration > 0
+        && last_position_ms.saturating_add(END_MS) >= duration
+}
+
+#[cfg(test)]
+mod started_track_tests {
+    use super::{replayed, started_track};
+    use serde_json::json;
+
+    #[test]
+    fn replay_is_the_start_after_the_end() {
+        let item = json!({"uri":"spotify:track:t","decorations":{"playback":{"duration_ms":200000}}});
+        let at = |ms: u64| json!({"type":"playback_state","item":item,"position":{"position_ms":ms}});
+        assert!(replayed(&at(0), 195_000));
+        assert!(!replayed(&at(0), 60_000));
+        assert!(!replayed(&at(90_000), 195_000));
+        assert!(!replayed(&json!({"type":"position_sync","position":{"position_ms":0}}), 195_000));
+    }
+
+    #[test]
+    fn the_stop_comes_a_margin_before_the_end() {
+        use super::time_to_end;
+        use std::time::Duration;
+        let ms = Duration::from_millis;
+        assert_eq!(time_to_end(0, 0, 0, 1.0, 10_000), Some(ms(9_850)));
+        assert_eq!(time_to_end(4_000, 1_000, 1_500, 1.0, 10_000), Some(ms(5_350)));
+        assert_eq!(time_to_end(0, 0, 0, 2.0, 10_000), Some(ms(4_850)));
+        assert_eq!(time_to_end(9_950, 0, 0, 1.0, 10_000), Some(ms(0)));
+        assert_eq!(time_to_end(0, 0, 0, 0.0, 10_000), None);
+        assert_eq!(time_to_end(0, 0, 0, 1.0, 0), None);
+    }
+
+    #[test]
+    fn reads_the_item_uri_of_song_messages_only() {
+        let item = json!({"uri":"spotify:track:t"});
+        assert_eq!(started_track(&json!({"type":"track_changed","item":item})), Some("spotify:track:t"));
+        assert_eq!(started_track(&json!({"type":"playback_state","item":item})), Some("spotify:track:t"));
+        assert_eq!(started_track(&json!({"type":"playback_state","item":{"uri":""}})), None);
+        assert_eq!(started_track(&json!({"type":"playback_changed","status":"paused"})), None);
+        assert_eq!(started_track(&json!({"type":"queue_changed","item":item})), None);
+    }
+}
 
 pub struct Handle {
     pub account: String,
@@ -508,6 +607,12 @@ async fn process(player: Player<'_>, mut stopped: watch::Receiver<bool>) -> Resu
         let mut pending_change = false;
         let mut pending_queue = false;
         let mut last_reconnect = None;
+        let mut last_track: Option<String> = None;
+        let mut last_position = 0u64;
+        let mut song_duration = 0u64;
+        let mut song_speed = 0f64;
+        let mut song_end: Option<tokio::time::Instant> = None;
+        let mut parked_at: Option<Instant> = None;
         loop {
             let mut reconnected = false;
             tokio::select! {
@@ -545,6 +650,14 @@ async fn process(player: Player<'_>, mut stopped: watch::Receiver<bool>) -> Resu
                     log::warn!("Soloist exited: {exit}");
                     if exit.code() == Some(10) { return Ok(Outcome::Expired); }
                     bail!(Failure::Stopped);
+                }
+                _ = tokio::time::sleep_until(song_end.unwrap_or_else(tokio::time::Instant::now)), if song_end.is_some() => {
+                    song_end = None;
+                    if let Some(uri) = last_track.clone() && client.take_pause_on_track() {
+                        reconnected |= protocol::send_reconnecting(&mut socket, port, json!({"command":"pause"})).await?;
+                        parked_at = Some(Instant::now());
+                        notify(Update::Ending { uri });
+                    }
                 }
                 _ = changes.tick(), if pending_change => {
                     changed = Instant::now();
@@ -587,6 +700,49 @@ async fn process(player: Player<'_>, mut stopped: watch::Receiver<bool>) -> Resu
                     let (message, received_after_reconnect) = message?;
                     reconnected |= received_after_reconnect;
                     if let Some(message) = message {
+                        let song = started_track(&message);
+                        if song.is_some_and(|uri| last_track.as_deref() != Some(uri)) { song_duration = 0; last_position = 0; }
+                        if song.is_some()
+                            && let Some(ms) = message["item"]["decorations"]["playback"]["duration_ms"].as_u64().filter(|ms| *ms > 0)
+                        { song_duration = ms; }
+                        let status = message["status"].as_str();
+                        if let Some(speed) = message["position"]["speed"].as_f64() { song_speed = speed; }
+                        else if status == Some("playing") && song_speed == 0.0 { song_speed = 1.0; }
+                        if status.is_some_and(|status| status != "playing") { song_speed = 0.0; }
+                        if song.is_some() || status.is_some() || message["position"]["position_ms"].is_u64() {
+                            let position = &message["position"];
+                            let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis().min(u64::MAX as u128) as u64;
+                            song_end = time_to_end(
+                                position["position_ms"].as_u64().unwrap_or(last_position),
+                                if position["position_ms"].is_u64() { position["timestamp_ms"].as_u64().unwrap_or(0) } else { 0 },
+                                now_ms,
+                                song_speed,
+                                song_duration,
+                            ).map(|left| tokio::time::Instant::now() + left);
+                        }
+                        if let Some(uri) = started_track(&message)
+                            && (last_track.as_deref() != Some(uri) || replayed(&message, last_position))
+                        {
+                            // After a reset the first song is only reported: it
+                            // may be mid-way, so it must not take the armed pause.
+                            let seen = last_track.replace(uri.to_owned()).is_some();
+                            if client.take_skip(uri) {
+                                // The armed pause stays for the song after it.
+                                reconnected |= protocol::send_reconnecting(&mut socket, port, json!({"command":"skip_next"})).await?;
+                                notify(Update::Skipped { uri: uri.to_owned() });
+                            } else {
+                                // A pause sent at the song's end can lose the race
+                                // with Soloist starting the next song: stop that too.
+                                let raced = parked_at.take().is_some_and(|at| at.elapsed() < PARKED_RACE);
+                                let paused = seen && (client.take_pause_on_track() || raced);
+                                if paused {
+                                    reconnected |= protocol::send_reconnecting(&mut socket, port, json!({"command":"pause"})).await?;
+                                    reconnected |= protocol::send_reconnecting(&mut socket, port, json!({"command":"seek", "position_ms":0})).await?;
+                                }
+                                notify(Update::Track { uri: uri.to_owned(), paused });
+                            }
+                        }
+                        if let Some(ms) = message["position"]["position_ms"].as_u64() { last_position = ms; }
                         let owned = bridge.as_ref().is_some_and(|bridge| bridge.owns_output_volume());
                         let (restore, kept) = listening_volume.observe(&message, logged_in && !owned, output_volume, Instant::now());
                         if kept { notify(Update::OutputVolume); }
@@ -611,13 +767,16 @@ async fn process(player: Player<'_>, mut stopped: watch::Receiver<bool>) -> Resu
                                     if let Some(bridge) = &bridge { notify(Update::Audio(bridge.routed())); }
                                     reconnected |= protocol::send_reconnecting(&mut socket, port, json!({"command":"get_state"})).await?;
                                 }
-                                else { client.bind(None); notify(Update::Status(Status::Pairing { name: name.into(), version: build.version.clone() })); }
+                                else { client.bind(None); last_track = None; notify(Update::Status(Status::Pairing { name: name.into(), version: build.version.clone() })); }
                             }
                         }
                         // Pausing retains the queue and context in the live child.
                         // Only an inactive device or an idle player may restart.
                         if matches!(kind, "playback_state" | "playback_changed") {
-                            if message["status"] == "idle" { player_idle = true; }
+                            if message["status"] == "idle" {
+                                if !player_idle && last_track.is_some() { notify(Update::Idle); }
+                                player_idle = true;
+                            }
                             else if matches!(message["status"].as_str(), Some("playing" | "buffering" | "paused")) { player_idle = false; }
                         }
                         idle = !active || player_idle;
@@ -633,6 +792,7 @@ async fn process(player: Player<'_>, mut stopped: watch::Receiver<bool>) -> Resu
                 }
             }
             if reconnected {
+                last_track = None;
                 // One drop is a hiccup; dropping again at once is a player
                 // that won't hold a connection, and retrying would spin.
                 if last_reconnect.is_some_and(|at: Instant| at.elapsed() < RECONNECT_WINDOW) {

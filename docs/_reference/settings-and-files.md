@@ -391,6 +391,7 @@ main fields are:
 | `player_bar_vis_click` | `true` | Allow clicks on empty player bar space to cycle visualizer modes |
 | `visualizer_fps` | `60` | Frame rate of the player bar and mini player visualizers; `0` is uncapped. Half that out of focus, at most 30 while the system saves energy, none while the window is hidden. MilkDrop uses `milkdrop_fps` |
 | `library_sort` | `{}` | Per-section Library order overrides, since 0.8.0: `library`, `recently_played`, `name`, `recently_added`, `local`, or `spotify`, where supported |
+| `mixed_playback` | `false` | With Soloist on, play local files on the built-in player and Spotify songs on Soloist. Needs the built-in player's Spotify access approval. See [Mixed playback](/soloist/#mixed-playback) |
 | `library_by_you` | `false` | Show only playlists owned by the signed-in account, alongside Liked Songs; applies only to the Playlists shelf |
 | `sidebar_order` | `[]` | Saved local playlist arrangement, including an unpinned Liked Songs, retained when another sort is selected |
 | `pinned_contexts` | `[]` | Local Library pin order; Liked Songs uses `spotifast:liked-songs`, a local key never sent to Spotify |

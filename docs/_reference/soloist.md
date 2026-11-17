@@ -194,8 +194,9 @@ and the output: if PipeWire links anything else into the private input,
 Spotifast removes the link, and the input is silent until it has gone.
 
 Linux without PipeWire keeps Soloist's direct output, without EQ or visualizers.
-The Mac and Windows routes are described below. Local files and full queue
-editing still require the built-in player on every platform.
+The Mac and Windows routes are described below. Full queue editing still
+requires the built-in player on every platform, and so do local files unless
+you turn on [mixed playback](#mixed-playback).
 The Soloist API itself provides no PCM stream. OS audio processing does not
 establish which Spotify format was delivered, and is not advertised as
 bit-perfect or as a DRM workaround.
@@ -257,6 +258,75 @@ that system control alone.
 Spotify lists capabilities such as Smart Shuffle, Jam and crossfade for its
 player. Spotifast only offers controls exposed by the documented Soloist API;
 those names alone do not establish an integration.
+
+## Mixed playback {#mixed-playback}
+
+Soloist cannot play local files. **Settings → Spotify Soloist → Play Local
+Files on the Built-in Player** lets both players share the work: Spotify songs
+play on Soloist and local files (`spotify:local:` songs) play on the built-in
+player. It needs Soloist turned on and the separate Spotify access approval
+that the built-in player signs in with. Turning the option on requests that
+approval if it is missing. The `mixed_playback` preference defaults to false.
+
+Starting a local song plays it, and the local songs right after it, on the
+built-in player. Soloist then continues the playlist from the next Spotify song.
+
+When local songs come after the Spotify song Soloist is playing, Spotifast
+tracks that song's position and duration and pauses Soloist 150 ms before it
+ends, which cuts only the song's silent tail. Soloist never starts its next
+song, so a switch is silent. The local songs then play on the built-in player,
+and Soloist moves on to its next song afterwards. If Soloist changes song before
+that pause lands, Spotifast pauses it at the start of the new song instead. Next
+on a Spotify song with local songs after it stops Soloist and plays them at once.
+
+While local songs play, the player controls drive the built-in player.
+Choosing another song ends the local stretch. Previous at the start of a local
+song plays the local song before it, one at a time, and goes back to Soloist's
+previous song only when no local song is left before it.
+
+With repeat one, nothing is armed and the song repeats on Soloist. With repeat
+all, local songs at the start of the playlist play after its last Spotify song,
+local songs at its end play before Soloist wraps, and a stretch of local songs
+that ends the playlist is followed by its first Spotify song. If Soloist
+repeats a song by starting it again, that restart also triggers the local songs
+armed after it, and Spotifast re-arms when repeat changes.
+
+Spotifast needs a playlist's whole row list to see local songs far down a long
+playlist. While one plays in mixed playback, it keeps loading the rest of the
+rows through the same loader and disk cache the playlist page uses.
+
+With shuffle on, Soloist shuffles only the Spotify songs and cannot see local
+ones, so Spotifast places them itself. At each song change it plays a random
+local song that has not played yet with a chance equal to the share of unplayed
+local songs among the songs left, so local songs mix in as fairly as any other.
+A shuffled start can also open on a local song with the same odds.
+
+Local songs can be queued and played next while Soloist plays. Spotify's queue
+refuses them, so Spotifast keeps its own entries for them, shown in **Playing
+next** in their place among the Spotify songs you queued. When Soloist reaches
+that spot, its next song starts paused, the local songs play on the built-in
+player, and Soloist resumes. **Play next** is offered for local songs only,
+since Soloist's queue can only take songs at its end.
+
+You can remove, clear and drag every queued row. Soloist cannot remove or
+reorder a song in its own queue, so Spotifast hides the row at once and
+remembers it. When Soloist reaches that song it skips it the moment it starts.
+Only the queued copy is skipped, not the same song later in the playlist. A
+dragged Spotify song is skipped where it was and queued again at its new place,
+along with the Spotify songs that follow it in the queue, so the order stays
+exact. This list is forgotten when Soloist restarts.
+
+Clicking a queued row skips past the rows above it, as in Spotify. Rows of
+local songs are not in Soloist's queue, so they are not counted as skips and
+the ones above the clicked row are dropped. Clicking a local row parks Soloist
+on the song before it, plays that local song and the local songs right after
+it, then moves Soloist on to its next song.
+
+When Soloist plays its last song and nothing follows, no next song starts to
+trigger the local songs. Spotifast notices Soloist going idle and plays the
+queued local songs then. A local song queued while local songs are already
+playing waits until they end. Local entries are not kept when Spotifast
+closes.
 
 ## Credentials, privacy and terms
 

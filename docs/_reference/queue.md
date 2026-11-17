@@ -94,7 +94,9 @@ not consume a queue row or restore an older queue saved on this computer.
    Spotify's queue never learns it, so its row stays until the song starts
    or the file cannot load. Another device, or Spotify itself, cannot reach
    the file: queueing there is refused instead of adding a row that would
-   never play.
+   never play. The exception is mixed playback with Soloist, which keeps the
+   local entries itself and plays them between its songs (see Mixed playback
+   in the Soloist reference).
 
    Since 0.9.0, an album's **Add to queue** adds its playable songs
    in album order, including repeated songs. This also works for singles and

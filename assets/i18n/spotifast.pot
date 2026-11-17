@@ -2433,6 +2433,16 @@ msgstr ""
 msgid "Go back to the built-in player. Your key stays saved."
 msgstr ""
 
+#: src/ui/soloist.rs:845 src/ui/soloist.rs:938
+msgid "Play Local Files on the Built-in Player"
+msgstr ""
+
+#: src/ui/soloist.rs:847
+msgid ""
+"Spotify songs play on Soloist so they count toward your listening history; "
+"local files play on the built-in player in between."
+msgstr ""
+
 #: src/ui/soloist.rs:848
 msgid "Ready on this computer."
 msgstr ""

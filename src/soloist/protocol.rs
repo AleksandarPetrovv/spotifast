@@ -83,8 +83,35 @@ pub struct Client {
     serial: Arc<tokio::sync::Mutex<()>>,
     /// How far behind Soloist's position the sound is, in our audio route.
     audio_delay_ms: Arc<AtomicU32>,
+    /// Mixed playback: pause and rewind the moment the next song starts.
+    pause_on_track: Arc<std::sync::atomic::AtomicBool>,
+    /// Mixed playback: queued songs the listener removed. Soloist's queue only
+    /// takes songs at its end, so each one is skipped the moment it starts.
+    skip_on_track: Arc<std::sync::Mutex<Vec<String>>>,
 }
 impl Client {
+    pub fn skip_on_tracks(&self, uris: Vec<String>) {
+        self.skip_on_track
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .extend(uris);
+    }
+    /// Says whether `uri` was to be skipped, and forgets that one occurrence.
+    pub fn take_skip(&self, uri: &str) -> bool {
+        let mut skips = self.skip_on_track.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(at) = skips.iter().position(|skip| skip == uri) else {
+            return false;
+        };
+        skips.remove(at);
+        true
+    }
+    pub fn pause_on_next_track(&self, armed: bool) {
+        self.pause_on_track.store(armed, Ordering::Relaxed);
+    }
+    /// Disarms and says whether it was armed.
+    pub fn take_pause_on_track(&self) -> bool {
+        self.pause_on_track.swap(false, Ordering::Relaxed)
+    }
     pub fn bind(&self, device: Option<Device>) {
         self.endpoint
             .write()
@@ -95,6 +122,11 @@ impl Client {
         let mut state = self.endpoint.write().unwrap_or_else(|e| e.into_inner());
         state.port = port;
         state.active = false;
+        drop(state);
+        self.skip_on_track
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clear();
     }
     pub fn active(&self, active: bool) {
         self.endpoint
@@ -390,6 +422,7 @@ fn playback(state: &Value, mut device: Device, delay_ms: u32) -> Result<Playback
         device: Some(device),
         item: item(&state["item"]),
         is_playing: active && state["status"] == "playing",
+        buffering: active && state["status"] == "buffering",
         progress_ms: Some(heard.min(u32::MAX as u64) as u32),
         context: context["uri"]
             .as_str()
@@ -439,6 +472,15 @@ mod tests {
         assert_eq!(got.item.unwrap().name(), "Song");
         assert_eq!(got.repeat_state, "track");
         assert!(got.shuffle_state);
+    }
+    #[test]
+    fn a_skip_is_used_once_per_queued_occurrence() {
+        let client = Client::default();
+        client.skip_on_tracks(vec!["a".into(), "a".into(), "b".into()]);
+        assert!(client.take_skip("a") && client.take_skip("a"));
+        assert!(!client.take_skip("a"));
+        client.listening(Some(1));
+        assert!(!client.take_skip("b"));
     }
     #[tokio::test]
     async fn unbound_or_inactive_player_does_not_replace_remote_state() {

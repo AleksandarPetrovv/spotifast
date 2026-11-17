@@ -204,7 +204,7 @@ librespot provides:
   later play after the next restart. See
   [issue #3](https://github.com/crmne/spotifast/issues/3). Spotify's queue
   refuses a `spotify:local:` entry, so such a song is queued on this
-  computer's own player, and only while it plays
+  computer's own player, or between Soloist's songs in mixed playback
   ([issue #1002](https://github.com/crmne/spotifast/issues/1002)). Spotify
   has no cover or lyrics for a local file either, so Spotifast reads them
   from the file: the picture in its tags (an MP3's ID3 `APIC` frame or a

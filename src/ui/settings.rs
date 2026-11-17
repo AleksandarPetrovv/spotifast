@@ -1192,8 +1192,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             ),
         ),
     ];
-    // Local files play through the built-in player only.
-    if built_in && section_matches(&needle, &local_files, &local_rows) {
+    // Local files play through the built-in player, which mixed playback also uses.
+    if (built_in || app.mixed_playback()) && section_matches(&needle, &local_files, &local_rows) {
         any_visible = true;
         section(ui, &palette, &local_files, |ui| {
             filtered_row(ui, &palette, &needle, &local_files, &local_rows[0], |ui| {

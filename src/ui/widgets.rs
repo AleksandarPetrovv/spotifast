@@ -718,7 +718,7 @@ pub fn picked_menu(
         &palette,
         Some(Icon::SkipForward),
         &gettext(locale, "Play next"),
-        app.queue_locally_reorderable() && queueable,
+        songs.iter().any(|item| app.can_play_next(item.uri())),
     ) {
         app.actions.push(Action::PlayNext {
             items: songs.to_vec(),
@@ -980,7 +980,7 @@ fn item_menu_at(
         &palette,
         Some(Icon::SkipForward),
         &gettext(locale, "Play next"),
-        app.queue_locally_reorderable() && queueable,
+        app.can_play_next(&uri),
     ) {
         app.actions.push(Action::PlayNext {
             items: vec![item.clone()],
@@ -1366,8 +1366,7 @@ pub(crate) fn row_playable(item: &PlayableItem) -> bool {
 /// this computer, matching how such a request waits for the engine.
 pub(crate) fn local_playable_here(app: &App, item: &PlayableItem) -> bool {
     item.uri().starts_with("spotify:local:")
-        && !app.settings.local_folders.is_empty()
-        && !matches!(app.target(), crate::app::Target::Remote(Some(_)))
+        && app.plays_local_files()
 }
 
 /// Whether a row can start playback where playback would go now.
@@ -1594,9 +1593,7 @@ fn track_row_contents(
                     editable_playlist: Some((id, _)),
                     ..
                 } => Some((id.clone(), row.index as u32)),
-                RowContext::Queue
-                    if row.index < app.queued_rows_len() && app.queue_locally_reorderable() =>
-                {
+                RowContext::Queue if app.can_remove_from_queue(row.index) => {
                     Some(("queue".to_string(), row.index as u32))
                 }
                 _ => None,

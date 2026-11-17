@@ -343,7 +343,7 @@ fn contents(app: &mut App, ui: &mut egui::Ui, compact: bool) {
     // Neither the Web API nor librespot can reorder or insert into a live
     // remote queue, so without local playback active every drop just
     // appends, same as the "Add to queue" menu item.
-    let reorderable = app.queue_locally_reorderable();
+    let reorderable = app.queue_locally_reorderable() || app.mixed_active();
     if !reorderable && let Some(track) = queue_drop(ui, ui.clip_rect()) {
         app.actions.push(Action::QueueMany {
             songs: track

@@ -782,6 +782,9 @@ pub struct PlaybackState {
     pub progress_ms: Option<u32>,
     #[serde(default)]
     pub is_playing: bool,
+    /// Soloist is loading audio (after a seek or a song change).
+    #[serde(default)]
+    pub buffering: bool,
     #[serde(default)]
     pub item: Option<PlayableItem>,
     #[serde(default)]

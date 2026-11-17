@@ -425,7 +425,8 @@ pub fn popup(app: &mut App, ctx: &egui::Context) {
                 // Offer one local destination once the managed player is
                 // ready. Keep an actually playing built-in engine visible;
                 // switching Soloist off in Settings restores its idle row.
-                let hide_builtin = soloist_id.is_some() && !app.local.is_active();
+                let hide_builtin =
+                    soloist_id.is_some() && (app.mixed_playback() || !app.local.is_active());
                 let mut devices: Vec<Device> = app.devices.clone();
                 if app.local_ready
                     && let Some(local_id) = &local_id

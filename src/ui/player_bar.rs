@@ -703,7 +703,6 @@ fn transport(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>, region:
     let cy = region.center().y - 8.0;
     let enabled = now.is_some_and(|now| now.can_control) || app.is_connected();
     let playing = now.is_some_and(|now| now.playing);
-    let loading = now.is_some_and(|now| now.loading);
     let shuffle = now.map_or_else(|| app.playing_context_shuffle(), |now| now.shuffle);
     let repeat = now.map(|now| now.repeat).unwrap_or_default();
     let dim = if enabled {
@@ -773,16 +772,7 @@ fn transport(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>, region:
     }
 
     let disc = slot(widths[2]);
-    if loading || app.any_play_pending() {
-        let mut cell = centered(ui, disc);
-        theme::circle_spinner(
-            &mut cell,
-            36.0,
-            palette.text,
-            palette.window,
-            &gettext(app.locale, "Loading…"),
-        );
-    } else {
+    {
         let icon = if playing {
             Icon::PauseFilled
         } else {

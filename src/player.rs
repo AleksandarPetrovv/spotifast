@@ -309,8 +309,18 @@ pub enum PlayerCommand {
     Shuffle(bool),
     Repeat(RepeatMode),
     Load(LoadSpec),
+    /// Local files played in order on this computer, on a player of their own:
+    /// Spotify Connect never hears of them and this device stays inactive.
+    PlayFiles(Vec<String>),
     /// Take over the active Connect session, including its queue and position.
     Transfer,
+}
+
+impl PlayerCommand {
+    /// Chooses what plays, instead of steering what already does.
+    pub fn replaces_playback(&self) -> bool {
+        matches!(self, Self::Load(_) | Self::PlayFiles(_))
+    }
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -430,11 +440,13 @@ pub struct KeptPlayer {
     mixer: Arc<dyn Mixer>,
     state: Arc<Mutex<LocalState>>,
     audio: Arc<AudioControl>,
+    direct: Arc<Direct>,
 }
 
 impl KeptPlayer {
     /// Stops the song, when nothing is going to pick it up.
     pub fn stop(&self) {
+        self.direct.end();
         self.player.stop();
     }
 
@@ -447,17 +459,22 @@ impl KeptPlayer {
         }
         // Shown at once, and a second toggle before the player answers
         // undoes the first instead of repeating it.
+        let player = if self.direct.active() {
+            &self.direct.player
+        } else {
+            &self.player
+        };
         match state.playback {
             Playback::Playing => {
                 state.position_ms = state.position_now();
                 state.position_at = None;
                 state.playback = Playback::Paused;
-                self.player.pause();
+                player.pause();
             }
             Playback::Paused => {
                 state.position_at = Some(Instant::now());
                 state.playback = Playback::Playing;
-                self.player.play();
+                player.play();
             }
             Playback::Stopped | Playback::Loading => return false,
         }
@@ -479,8 +496,126 @@ impl KeptPlayer {
     }
 }
 
+/// Local files played on a librespot player of their own, one Spirc does not
+/// know. Spirc answers every event of the player it was given: the end of a
+/// file makes it stop that player or load a Spotify song, and what it plays
+/// goes to Spotify as this device's state.
+struct Direct {
+    player: Arc<Player>,
+    list: Mutex<Option<DirectList>>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct DirectList {
+    uris: Vec<String>,
+    at: usize,
+}
+
+impl DirectList {
+    fn next(&self) -> Option<usize> {
+        (self.at + 1 < self.uris.len()).then_some(self.at + 1)
+    }
+
+    fn previous(&self) -> Option<usize> {
+        self.at.checked_sub(1)
+    }
+}
+
+impl Direct {
+    fn list(&self) -> std::sync::MutexGuard<'_, Option<DirectList>> {
+        self.list.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    fn active(&self) -> bool {
+        self.list().is_some()
+    }
+
+    fn play(&self, uris: Vec<String>) -> Result<()> {
+        if uris.is_empty() {
+            anyhow::bail!("nothing to play");
+        }
+        let mut list = DirectList { uris, at: 0 };
+        self.load_at(&mut list, 0)?;
+        *self.list() = Some(list);
+        Ok(())
+    }
+
+    fn load_at(&self, list: &mut DirectList, at: usize) -> Result<()> {
+        let uri = SpotifyUri::from_uri(&list.uris[at])?;
+        list.at = at;
+        self.player.load(uri, true, 0);
+        Ok(())
+    }
+
+    /// Drops the list and stops its file, when there is one.
+    fn end(&self) {
+        if self.list().take().is_some() {
+            self.player.stop();
+        }
+    }
+
+    /// The next file, or the end of the list.
+    fn next(&self) -> Result<()> {
+        let mut guard = self.list();
+        let Some(list) = guard.as_mut() else {
+            return Ok(());
+        };
+        match list.next() {
+            Some(at) => self.load_at(list, at),
+            None => {
+                *guard = None;
+                self.player.stop();
+                Ok(())
+            }
+        }
+    }
+
+    fn previous(&self) -> Result<()> {
+        let mut guard = self.list();
+        let Some(list) = guard.as_mut() else {
+            return Ok(());
+        };
+        match list.previous() {
+            Some(at) => self.load_at(list, at),
+            None => {
+                self.player.seek(0);
+                Ok(())
+            }
+        }
+    }
+
+    /// Takes the commands that steer the list's file. False when it is not
+    /// the one playing, or the command is not one of those.
+    fn steer(&self, playback: Playback, command: &PlayerCommand) -> Result<bool> {
+        if !self.active() {
+            return Ok(false);
+        }
+        match command {
+            PlayerCommand::Toggle => match playback {
+                Playback::Playing | Playback::Loading => self.player.pause(),
+                Playback::Paused => self.player.play(),
+                Playback::Stopped => {}
+            },
+            PlayerCommand::Seek(position_ms) => self.player.seek(*position_ms),
+            PlayerCommand::Next => self.next()?,
+            PlayerCommand::Previous => self.previous()?,
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    /// The file ended by itself.
+    fn ended(&self) {
+        if let Err(error) = self.next() {
+            log::warn!("local file list stopped: {error}");
+            self.end();
+        }
+    }
+}
+
 pub struct Engine {
     player: Arc<Player>,
+    direct: Arc<Direct>,
     spirc: Arc<Spirc>,
     session: Session,
     mixer: Arc<dyn Mixer>,
@@ -520,8 +655,8 @@ impl Engine {
         };
         let session = Session::new(session_config, Some(cache));
         let carrying = kept.is_some();
-        let (player, mixer, state, audio) = match kept {
-            Some(kept) => (kept.player, kept.mixer, kept.state, kept.audio),
+        let (player, direct, mixer, state, audio) = match kept {
+            Some(kept) => (kept.player, kept.direct, kept.mixer, kept.state, kept.audio),
             None => Self::start_player(config, &session, &notify)?,
         };
 
@@ -601,6 +736,7 @@ impl Engine {
         let device_id = config.device_id();
         Ok(Self {
             player,
+            direct,
             spirc: Arc::new(spirc),
             session,
             mixer,
@@ -622,6 +758,7 @@ impl Engine {
         notify: &Notify,
     ) -> Result<(
         Arc<Player>,
+        Arc<Direct>,
         Arc<dyn Mixer>,
         Arc<Mutex<LocalState>>,
         Arc<AudioControl>,
@@ -658,23 +795,33 @@ impl Engine {
             ..LocalState::default()
         }));
         let audio = AudioControl::new(config.buffer_ms);
-        let (sink_builder, volume) = sink_builder(
-            config,
-            Arc::clone(&state),
-            Arc::clone(notify),
-            &mixer,
-            Arc::clone(&normalisation_factor),
-            Arc::clone(&audio),
-        );
-        let player = Player::new(player_config, session.clone(), volume, sink_builder);
-        let events = player.get_player_event_channel();
-        tokio::spawn(run_events(
-            events,
-            Arc::clone(&state),
-            Arc::clone(notify),
-            Arc::clone(&audio),
-        ));
-        Ok((player, mixer, state, audio))
+        let new_player = || {
+            let (sink_builder, volume) = sink_builder(
+                config,
+                Arc::clone(&state),
+                Arc::clone(notify),
+                &mixer,
+                Arc::clone(&normalisation_factor),
+                Arc::clone(&audio),
+            );
+            Player::new(player_config.clone(), session.clone(), volume, sink_builder)
+        };
+        let player = new_player();
+        let direct = Arc::new(Direct {
+            player: new_player(),
+            list: Mutex::new(None),
+        });
+        for (player, files) in [(&player, false), (&direct.player, true)] {
+            tokio::spawn(run_events(
+                player.get_player_event_channel(),
+                Arc::clone(&state),
+                Arc::clone(notify),
+                Arc::clone(&audio),
+                Arc::clone(&direct),
+                files,
+            ));
+        }
+        Ok((player, direct, mixer, state, audio))
     }
 
     /// The player and what it plays through, for the engine that replaces
@@ -683,6 +830,7 @@ impl Engine {
     pub fn keep_player(&self) -> KeptPlayer {
         KeptPlayer {
             player: Arc::clone(&self.player),
+            direct: Arc::clone(&self.direct),
             mixer: Arc::clone(&self.mixer),
             state: Arc::clone(&self.state),
             audio: Arc::clone(&self.audio),
@@ -821,6 +969,7 @@ impl Engine {
             .store(true, std::sync::atomic::Ordering::SeqCst);
         let _ = self.spirc.shutdown();
         self.player.stop();
+        self.direct.end();
     }
 
     /// Ends the session but leaves the player playing, for an engine that
@@ -832,6 +981,11 @@ impl Engine {
     }
 
     pub fn resume_point(&self) -> Option<PlaybackResume> {
+        // A load would make this device the account's active one, which an
+        // interlude never does; the app starts its next interlude itself.
+        if self.direct.active() {
+            return None;
+        }
         // A file from this computer is unknown to Spotify's servers, so a
         // Connect snapshot that names it cannot be restored there (the
         // server's connect-state write answers 400). Pick the file up with a
@@ -872,9 +1026,12 @@ impl Engine {
     }
 
     pub fn command(&self, command: PlayerCommand) -> Result<()> {
-        if matches!(command, PlayerCommand::Load(_) | PlayerCommand::Transfer) {
+        if command.replaces_playback() || command == PlayerCommand::Transfer {
             // Something else chosen replaces the song a dropped session left.
             self.stop_carrying();
+        }
+        if matches!(command, PlayerCommand::Load(_) | PlayerCommand::Transfer) {
+            self.direct.end();
         }
         let interrupts_audio = command_interrupts_audio(
             &self.state.lock().unwrap_or_else(|p| p.into_inner()),
@@ -891,8 +1048,18 @@ impl Engine {
     }
 
     fn send_command(&self, command: PlayerCommand) -> Result<()> {
+        let playback = self.state.lock().unwrap_or_else(|p| p.into_inner()).playback;
+        if self.direct.steer(playback, &command)? {
+            return Ok(());
+        }
         let spirc = &self.spirc;
         match command {
+            PlayerCommand::PlayFiles(uris) => {
+                if playback != Playback::Stopped && !self.direct.active() {
+                    self.player.stop();
+                }
+                self.direct.play(uris)?;
+            }
             PlayerCommand::Toggle => spirc.play_pause()?,
             PlayerCommand::Next => spirc.next()?,
             PlayerCommand::Previous => spirc.prev()?,
@@ -993,10 +1160,8 @@ fn session_ended(state: &mut LocalState, shut_down: bool) {
 
 fn command_interrupts_audio(state: &LocalState, command: &PlayerCommand) -> bool {
     state.playback == Playback::Playing
-        && matches!(
-            command,
-            PlayerCommand::Next | PlayerCommand::Previous | PlayerCommand::Load(_)
-        )
+        && (matches!(command, PlayerCommand::Next | PlayerCommand::Previous)
+            || command.replaces_playback())
 }
 
 /// Builds the audio sink and chooses where volume is applied.
@@ -1091,6 +1256,8 @@ async fn run_events(
     state: Arc<Mutex<LocalState>>,
     notify: Notify,
     audio: Arc<AudioControl>,
+    direct: Arc<Direct>,
+    files: bool,
 ) {
     let mut play_request_id = None;
     while let Some(event) = events.recv().await {
@@ -1107,6 +1274,14 @@ async fn run_events(
             continue;
         }
         audio.handle_player_event(&event);
+        match (&event, files) {
+            (PlayerEvent::EndOfTrack { .. } | PlayerEvent::Unavailable { .. }, true) => {
+                direct.ended()
+            }
+            // Spotify's own playback began on this computer, from another client.
+            (PlayerEvent::TrackChanged { .. }, false) => direct.end(),
+            _ => {}
+        }
         let snapshot = {
             let mut current = state.lock().unwrap_or_else(|p| p.into_inner());
             if apply_event(&mut current, event) {
@@ -2038,6 +2213,18 @@ mod tests {
         ));
         assert_eq!(state.error.as_deref(), Some(AUDIO_KEY_REFUSED));
         assert!(!state.loading);
+    }
+
+    #[test]
+    fn a_file_list_steps_within_its_bounds() {
+        let list = |at| DirectList {
+            uris: vec!["a".into(), "b".into(), "c".into()],
+            at,
+        };
+        assert_eq!(list(0).next(), Some(1));
+        assert_eq!(list(2).next(), None);
+        assert_eq!(list(0).previous(), None);
+        assert_eq!(list(2).previous(), Some(1));
     }
 
     #[test]

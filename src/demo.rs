@@ -766,6 +766,7 @@ pub fn populate(app: &mut App) {
             timestamp: 0,
             progress_ms: Some(83_000),
             is_playing: true,
+            buffering: false,
             item: Some(PlayableItem::Track(tracks[0].clone())),
             currently_playing_type: Some("track".into()),
         },

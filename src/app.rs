@@ -86,6 +86,19 @@ const ASSUMED_CONTEXT_HOLD: Duration = Duration::from_secs(8);
 /// has not caught up yet. Spotify can take a moment to report a command it
 /// has already carried out.
 const PLAYBACK_HOLD: Duration = Duration::from_secs(6);
+/// How long a confirmed play/pause keeps showing before polled state rules.
+const PLAYBACK_SETTLE: Duration = Duration::from_millis(1500);
+/// How long a song switch or seek keeps the playing icon before the real
+/// state shows.
+const SWITCH_HOLD: Duration = Duration::from_secs(3);
+/// How long the players must have agreed with a play/pause press before the
+/// icon follows them again.
+const PLAY_CONFIRM: Duration = Duration::from_millis(300);
+/// How long an interlude waits for the built-in player to report its files
+/// before giving up (a file that will not load).
+const MIXED_ENGINE_WAIT: Duration = Duration::from_secs(8);
+/// How long a silent Soloist skip waits for its song before playing anyway.
+const SOLOIST_HOP_WAIT: Duration = Duration::from_secs(4);
 /// Delay before checking playback again after a command.
 const REMOTE_RECHECK: Duration = Duration::from_millis(1200);
 /// Least time between polls that Spotify's pushes ask for. Turning another
@@ -178,6 +191,18 @@ struct PlaylistDetailChanges {
 enum TrackConfirmation {
     Local,
     Remote { after_poll: u64, mismatches: u8 },
+}
+
+#[derive(Clone, Debug)]
+struct SoloistTarget {
+    /// The song to land on; none accepts wherever one skip leads.
+    want: Option<String>,
+    /// Skips left to try when a song other than `want` is reached.
+    hops: usize,
+    previous: bool,
+    /// Local songs to play once there, with Soloist parked on the song.
+    run: Vec<String>,
+    at: Instant,
 }
 
 /// Upcoming context order before shuffle was toggled, used to detect lagging responses.
@@ -712,6 +737,33 @@ pub struct App {
     /// Last list sent to local playback. Used for autoplay because librespot
     /// cannot continue a list without a context URI.
     local_list: Option<Vec<String>>,
+    /// Mixed playback: the stretch of local files the built-in player is
+    /// playing between Soloist's songs.
+    mixed: Option<crate::twerkz::mixed::Interlude>,
+    /// Since when the built-in player has been asked for the interlude's
+    /// files without reporting any of them yet.
+    mixed_pending: Option<Instant>,
+    /// Soloist's last reported song, to see which local files it skipped.
+    mixed_last: Option<String>,
+    /// The order Soloist plays when it was started from a plain list of songs.
+    mixed_list: Vec<String>,
+    /// The local songs Soloist is armed to pause for when its next song starts.
+    mixed_next: Option<Vec<String>>,
+    /// Local songs a Previous stepped back over: the next arming plays them
+    /// again instead of working the following ones out.
+    mixed_rearm: Option<Vec<String>>,
+    /// Queued Spotify songs the listener removed that Soloist still holds,
+    /// hidden from the queue until it reaches and skips them.
+    mixed_skip: Vec<String>,
+    /// The songs this shuffled run of the playing context has played.
+    mixed_shuffle: Option<crate::twerkz::mixed::ShuffleRun>,
+    mixed_history: crate::twerkz::mixed::History,
+    /// Soloist's song the bar must not show while the song that replaces it
+    /// has not been reported yet.
+    soloist_stale: Option<(String, Instant)>,
+    /// A silent Soloist skip under way: it stays paused until it is on the
+    /// wanted song, and only then plays.
+    soloist_target: Option<SoloistTarget>,
     /// Activated receiver waiting to appear in Spotify's device list.
     pending_transfer_to: Option<(String, Instant)>,
     /// When to take a confirming look at remote playback after a command.
@@ -754,6 +806,17 @@ pub struct App {
     last_eviction: Instant,
     /// Playback snapshot for the current frame, built once per redraw.
     frame_now: Option<NowPlaying>,
+    /// The last song the player bar showed; outlives `frame_now`, which is
+    /// dropped every frame.
+    last_shown: Option<NowPlaying>,
+    /// The song last shown playing, and since when a switch or seek has held
+    /// the playing icon while the new source had no state yet.
+    shown_playing: Option<(String, Option<Instant>)>,
+    /// When Previous or Next was last pressed: the song is changing, so the
+    /// playing icon is held and the bar starts from zero.
+    skipped_at: Option<Instant>,
+    /// Last position drawn, so a fresh snapshot slews in instead of jumping.
+    shown_position: Option<(String, u32, Instant)>,
     pub sign_in_url: Option<String>,
     /// The verified personal Web API application, when acceleration is ready.
     pub web_app: Option<String>,
@@ -775,6 +838,9 @@ pub struct App {
     /// A local seek position set here that the engine has not confirmed yet.
     pending_local_position: Option<(u32, Instant)>,
     optimistic_playing: Option<(bool, Instant)>,
+    /// The state a play/pause press asked for. The playing icon shows exactly
+    /// this, whatever the players report meanwhile, until they agree.
+    play_wanted: Option<(bool, Instant)>,
     /// Track shown immediately after a play or skip, until playback reports.
     intent_track: Option<TrackIntent>,
     /// The row the current song was started from, while it still plays.
@@ -1414,6 +1480,17 @@ impl App {
             pending_play_at: None,
             queued_play: None,
             local_list: None,
+            mixed: None,
+            mixed_pending: None,
+            mixed_last: None,
+            mixed_list: Vec::new(),
+            mixed_next: None,
+            mixed_rearm: None,
+            mixed_skip: Vec::new(),
+            mixed_shuffle: None,
+            mixed_history: Default::default(),
+            soloist_stale: None,
+            soloist_target: None,
             pending_transfer_to: None,
             remote_recheck_at: None,
             remote_pushed_at: None,
@@ -1438,6 +1515,10 @@ impl App {
             immersive: None,
             last_eviction: Instant::now(),
             frame_now: None,
+            last_shown: None,
+            shown_playing: None,
+            skipped_at: None,
+            shown_position: None,
             sign_in_url: None,
             web_app: None,
             shared_grant: false,
@@ -1449,6 +1530,7 @@ impl App {
             pending_local_volume: None,
             pending_local_position: None,
             optimistic_playing: None,
+            play_wanted: None,
             intent_track: None,
             played_row: None,
             shuffle_wanted: session.shuffle_on,
@@ -1950,7 +2032,7 @@ impl App {
 
     /// Where playback commands go: this computer's player or a remote device.
     pub fn target(&self) -> Target {
-        if self.local_ready && self.local.is_active() {
+        if self.local_ready && self.local_in_charge() {
             return Target::Local;
         }
         if let Some(selected) = &self.selected_device
@@ -1966,6 +2048,11 @@ impl App {
             if !is_local && (remote.state.is_playing || remote.state.item.is_some()) {
                 return Target::Remote(device.and_then(|device| device.id.clone()));
             }
+        }
+        // Mixed playback never lets a Spotify song fall back to the
+        // built-in player.
+        if self.mixed_playback() && self.soloist_device_id.is_some() {
+            return Target::Remote(self.soloist_device_id.clone());
         }
         if self.local_ready {
             Target::Local
@@ -2021,6 +2108,27 @@ impl App {
         }
     }
 
+    /// Soloist plays Spotify songs and the built-in player plays the local
+    /// files between them.
+    pub fn mixed_playback(&self) -> bool {
+        self.settings.soloist_enabled && self.settings.mixed_playback
+    }
+
+    /// The built-in player is the one playing and controlled. In mixed
+    /// playback that is only during an interlude, so a paused leftover song
+    /// never hides Soloist's.
+    fn local_in_charge(&self) -> bool {
+        self.local.is_active() && (!self.mixed_playback() || self.mixed.is_some())
+    }
+
+    /// Whether local files can play from here: on this computer's player, or
+    /// between Soloist's songs in mixed playback.
+    pub fn plays_local_files(&self) -> bool {
+        !self.settings.local_folders.is_empty()
+            && (!matches!(self.target(), Target::Remote(Some(_)))
+                || (self.mixed_playback() && self.local_ready && self.targets_own_soloist()))
+    }
+
     /// A running child is not usable until its Connect device has been
     /// verified against the signed-in account. Never fall through to the
     /// built-in player while the chosen player is starting or needs help.
@@ -2072,7 +2180,7 @@ impl App {
     /// describes the past, however late it arrived, and its context with it:
     /// a playlist left for an album must not light up again (#1121).
     fn remote_lags_local(&self) -> bool {
-        let Some(track) = self.local.track.as_ref().filter(|_| self.local.is_active()) else {
+        let Some(track) = self.local.track.as_ref().filter(|_| self.local_in_charge()) else {
             return false;
         };
         self.remote
@@ -2233,7 +2341,10 @@ impl App {
     fn reconcile_remote_track_intent(&mut self, poll: u64, reported: Option<&str>) {
         let mut settled = false;
         let mut recheck = false;
-        if let Some(intent) = &mut self.intent_track
+        // Soloist is still hopping to the song: what it reports is in between.
+        let hopping = self.soloist_target.is_some();
+        if !hopping
+            && let Some(intent) = &mut self.intent_track
             && let TrackConfirmation::Remote {
                 after_poll,
                 mismatches,
@@ -2321,10 +2432,97 @@ impl App {
     }
 
     fn refresh_frame_now(&mut self) {
-        self.frame_now = self
+        let mut now = self
             .requested_track_preview()
             .or_else(|| self.now_playing_live())
             .or_else(|| self.resume_preview());
+        if let Some(now) = &mut now {
+            let live_playing = now.playing && !now.loading;
+            self.hold_playing(now);
+            self.smooth_position(now, live_playing);
+        }
+        if now.is_some() {
+            self.last_shown.clone_from(&now);
+        }
+        self.frame_now = now;
+    }
+
+    /// While playing, a fresh position within a second of the one drawn
+    /// slews in at up to a quarter of the clock rate instead of jumping, and
+    /// never runs backwards. A song change, seek or bigger gap snaps.
+    fn smooth_position(&mut self, now: &mut NowPlaying, live_playing: bool) {
+        if let Some((uri, shown, at)) = self.shown_position.take()
+            && live_playing
+            && uri == now.uri
+            && at.elapsed() < Duration::from_secs(1)
+        {
+            let dt = at.elapsed().as_millis() as i64;
+            let expected = i64::from(shown) + dt;
+            let error = i64::from(now.position_ms) - expected;
+            if error.abs() <= 1000 {
+                let mut position = (expected + error.clamp(-dt / 4, dt / 4)).max(i64::from(shown));
+                if now.duration_ms > 0 {
+                    position = position.min(i64::from(now.duration_ms));
+                }
+                now.position_ms = position as u32;
+            }
+        }
+        self.shown_position = Some((now.uri.clone(), now.position_ms, Instant::now()));
+    }
+
+    /// Previous and Next start a song from zero: show that and keep the
+    /// playing icon at once, whichever player answers later.
+    fn show_song_start(&mut self) {
+        let now = Instant::now();
+        match self.target() {
+            Target::Local => self.pending_local_position = Some((0, now)),
+            Target::Remote(_) => self.pending_remote_position = Some((0, now)),
+        }
+        self.skipped_at = Some(now);
+        self.shown_position = None;
+    }
+
+    /// A song switch or seek during playback passes through loading and
+    /// buffering states that read as paused: keep showing playing until the
+    /// new source reports playing, or `SWITCH_HOLD` passes.
+    fn hold_playing(&mut self, now: &mut NowPlaying) {
+        if let Some((wanted, at)) = self.play_wanted {
+            let agreed = at.elapsed() >= PLAY_CONFIRM && self.reported_playing() == Some(wanted);
+            if at.elapsed() < SWITCH_HOLD && !agreed {
+                now.playing = wanted;
+                self.shown_playing = wanted.then(|| (now.uri.clone(), None));
+                return;
+            }
+            self.play_wanted = None;
+        }
+        if now.playing {
+            self.shown_playing = Some((now.uri.clone(), None));
+            return;
+        }
+        let Some((uri, since)) = &mut self.shown_playing else {
+            return;
+        };
+        let seeking = self
+            .pending_remote_position
+            .into_iter()
+            .chain(self.pending_local_position)
+            .any(|(_, at)| at.elapsed() < OPTIMISTIC_HOLD);
+        let buffering = !now.local && self.remote.as_ref().is_some_and(|r| r.state.buffering);
+        let skipping = self.skipped_at.is_some_and(|at| at.elapsed() < SWITCH_HOLD);
+        let moving = *uri != now.uri || seeking || buffering || now.loading || skipping;
+        if moving && since.get_or_insert_with(Instant::now).elapsed() < SWITCH_HOLD {
+            now.playing = true;
+        } else {
+            self.shown_playing = None;
+        }
+    }
+
+    /// What the player in charge reports, without any local request on top.
+    fn reported_playing(&self) -> Option<bool> {
+        if self.local_in_charge() {
+            return Some(self.local.playback == Playback::Playing);
+        }
+        self.remote_fresh().map(|remote| remote.state.is_playing)
     }
 
     /// Keep the player bar on the same requested song as the playlist marker
@@ -2356,7 +2554,7 @@ impl App {
 
     /// What a device is actually playing, here or elsewhere.
     fn now_playing_live(&self) -> Option<NowPlaying> {
-        if self.local.is_active() && self.local_transfer_sequence != Some(self.local.track_sequence)
+        if self.local_in_charge() && self.local_transfer_sequence != Some(self.local.track_sequence)
         {
             let track = self.local.track.as_ref()?;
             let cached = track
@@ -2416,7 +2614,11 @@ impl App {
                 // what the spinner follows.
                 loading: self.local.loading,
                 shuffle: self.shuffle_wanted,
-                repeat: self.local.repeat,
+                repeat: if self.mixed_active() {
+                    self.mixed_repeat()
+                } else {
+                    self.local.repeat
+                },
                 volume_percent: volume_to_percent(self.local.volume),
                 can_control: true,
                 can_set_volume: true,
@@ -2438,13 +2640,29 @@ impl App {
             return None;
         }
         let item = remote.state.item.as_ref()?;
+        if let Some((stale, at)) = &self.soloist_stale
+            && (item.uri() == stale || self.soloist_target.is_some())
+            && at.elapsed() < SWITCH_HOLD
+            && let Some(shown) = &self.last_shown
+        {
+            return Some(shown.clone());
+        }
         let device = remote.state.device.as_ref();
         let playing = match self.optimistic_playing {
             Some((playing, at)) if at.elapsed() < PLAYBACK_HOLD => playing,
             _ => remote.state.is_playing,
         };
         let position = match self.pending_remote_position {
-            Some((position, at)) if at.elapsed() < OPTIMISTIC_HOLD => position,
+            // The held seek keeps counting while playing; frozen, the clock
+            // stood still until the hold ran out and then jumped.
+            Some((position, at)) if at.elapsed() < OPTIMISTIC_HOLD => {
+                if playing {
+                    (position as u64 + at.elapsed().as_millis() as u64)
+                        .min(item.duration_ms() as u64) as u32
+                } else {
+                    position
+                }
+            }
             _ => {
                 let base = remote.state.progress_ms.unwrap_or(0);
                 if remote.state.is_playing {
@@ -3230,6 +3448,7 @@ impl App {
     }
 
     fn clear_soloist_target(&mut self) {
+        self.reset_mixed();
         let Some(id) = self.soloist_device_id.take() else {
             return;
         };
@@ -3289,6 +3508,14 @@ impl App {
                     if queue { self.queue_fetched_at = None; }
                 }
             }
+            Update::Track { uri, paused } => self.on_soloist_track(uri, paused),
+            Update::Skipped { uri } => {
+                if let Some(at) = self.mixed_skip.iter().position(|skip| *skip == uri) {
+                    self.mixed_skip.remove(at);
+                }
+            }
+            Update::Ending { uri } => self.on_soloist_ending(uri),
+            Update::Idle => self.on_soloist_idle(),
             Update::UpdateReady(version) => self.soloist_update = Some(version),
             Update::UpdateFailed => self.toast_error(gettext(self.locale, "Soloist could not download its renewal. It will retry tomorrow; the current build is still installed.")),
         }
@@ -3429,6 +3656,7 @@ impl App {
             AuthStatus::SignedOut => {
                 self.soloist_key.clear();
                 self.soloist_device_id = None;
+                self.reset_mixed();
                 self.soloist_status = crate::soloist::Status::Off;
                 self.soloist_audio = false;
                 self.soloist_update = None;
@@ -3882,7 +4110,9 @@ impl App {
         let track_changed =
             state.track != self.local.track || state.track_sequence != self.local.track_sequence;
         let reconnected = state.connected && !self.local.connected;
+        let new_error = state.error.is_some() && state.error != self.local.error;
         if state.shuffle != self.local.shuffle
+            && self.mixed.is_none()
             && self
                 .shuffle_set_at
                 .is_none_or(|at| at.elapsed() > Duration::from_secs(5))
@@ -3999,6 +4229,11 @@ impl App {
         if track_changed {
             self.on_now_playing_changed();
         }
+        if new_error && self.mixed_pending.is_some() {
+            // The first file would not load: nothing is coming from the engine.
+            self.mixed_pending = Instant::now().checked_sub(MIXED_ENGINE_WAIT);
+        }
+        self.check_interlude();
         if reconnected {
             self.replay_queued_play();
             // Retry names requested before the session connected.
@@ -4523,6 +4758,8 @@ impl App {
     fn tick(&mut self, ctx: &egui::Context) {
         self.poll_custom_themes(ctx);
         self.retry_soloist_when_due(ctx);
+        self.check_interlude();
+        self.check_soloist_target();
         if self.queued_play.is_some() && self.soloist_waiting() && !self.soloist_recovering() {
             self.soloist_give_up();
         }
@@ -7378,8 +7615,11 @@ impl App {
             self.play_request(PlayRequest::tracks(uris).starting_at_index(index), false);
             return;
         }
+        let mixed = self.mixed_active();
         let mut skips = index + 1;
+        let mut run: Vec<String> = Vec::new();
         let mut consumed: Vec<String> = Vec::new();
+        let mut want: Option<String> = None;
         if let Loadable::Loaded(queue) = &mut self.queue {
             // The click names a song; if the rows shifted under the
             // pointer, the song wins over the row number.
@@ -7391,12 +7631,35 @@ impl App {
                 self.refresh_queue(true);
                 return;
             };
-            skips = position + 1;
-            let mut items: Vec<_> = queue.queue.drain(..=position).collect();
-            let chosen = items.pop().expect("the chosen row was just drained");
+            let mut end = position + 1;
+            if mixed {
+                // Local rows are not in Soloist's queue, so they take no
+                // skip. A local row plays with the local songs right after
+                // it, once Soloist is parked on the song before it.
+                let local = |item: &PlayableItem| crate::twerkz::mixed::is_local(item.uri());
+                skips = queue.queue[..position].iter().filter(|i| !local(i)).count();
+                // The Spotify song Soloist must sit on: the clicked row, or
+                // the one before a clicked local row.
+                want = queue.queue[..=position]
+                    .iter()
+                    .rev()
+                    .find(|i| !local(i))
+                    .map(|item| item.uri().to_string());
+                if local(&queue.queue[position]) {
+                    end = position + queue.queue[position..].iter().take_while(|i| local(i)).count();
+                    run = queue.queue[position..end]
+                        .iter()
+                        .map(|item| item.uri().to_string())
+                        .collect();
+                } else {
+                    skips += 1;
+                }
+            } else {
+                skips = position + 1;
+            }
+            let items: Vec<_> = queue.queue.drain(..end).collect();
             consumed = items.iter().map(|item| item.uri().to_string()).collect();
-            consumed.push(chosen.uri().to_string());
-            queue.currently_playing = Some(chosen);
+            queue.currently_playing = Some(items[position].clone());
         }
         for gone in &consumed {
             if let Some(at) = self.manual_queue.iter().position(|queued| queued == gone) {
@@ -7407,6 +7670,11 @@ impl App {
         self.queue_start_pending = Some(self.target());
         self.set_play_pending(vec![uri]);
         self.optimistic_playing = Some((true, Instant::now()));
+        if mixed {
+            self.mixed_shuffle_consume(&run);
+            self.mixed_play_row(skips, run, want);
+            return;
+        }
         match self.target() {
             Target::Local => {
                 for _ in 0..skips {
@@ -7414,6 +7682,7 @@ impl App {
                 }
             }
             Target::Remote(device_id) => {
+                self.mixed_disarm();
                 // With nothing to act on, one call earns the "pick
                 // something first" toast; a skip per row would repeat it.
                 if device_id.is_none() && self.remote_fresh().is_none() {
@@ -7453,13 +7722,16 @@ impl App {
 
     /// Whether the active local queue has rows that can be cleared.
     pub fn can_clear_queue(&self) -> bool {
+        if self.mixed_active() {
+            return !self.manual_queue.is_empty();
+        }
         self.queue_locally_reorderable() && self.queued_rows_len() > 0
     }
 
     /// Whether the queue row at `index` is one of the manually queued
     /// songs the active local queue lets the user take out.
     pub fn can_remove_from_queue(&self, index: usize) -> bool {
-        self.queue_locally_reorderable() && index < self.queued_rows_len()
+        (self.mixed_active() || self.queue_locally_reorderable()) && index < self.queued_rows_len()
     }
 
     /// Takes the chosen rows out of Playing next. Neither the Web API nor
@@ -7467,7 +7739,8 @@ impl App {
     /// the local engine's queue, and only that one. A row whose index no
     /// longer holds its song is left alone.
     fn remove_from_queue(&mut self, rows: Vec<(usize, String)>) {
-        if !self.queue_locally_reorderable() {
+        let mixed = self.mixed_active();
+        if !mixed && !self.queue_locally_reorderable() {
             return;
         }
         let queued_len = self.queued_rows_len();
@@ -7488,6 +7761,7 @@ impl App {
         indexes.sort_unstable();
         indexes.dedup();
         let mut removed = std::collections::HashSet::new();
+        let mut skipped = Vec::new();
         // From the bottom up, so the rows still to go keep their indexes.
         for index in indexes.into_iter().rev() {
             let Loadable::Loaded(queue) = &mut self.queue else {
@@ -7513,9 +7787,17 @@ impl App {
             };
             queue.queue.remove(index);
             self.remove_manual_queue_row(manual);
+            if !crate::twerkz::mixed::is_local(&uri) {
+                skipped.push(uri.clone());
+            }
             removed.insert(uri);
         }
         if removed.is_empty() {
+            return;
+        }
+        if mixed {
+            self.mixed_skip_rows(skipped);
+            self.mixed_requeue();
             return;
         }
         if let Some((earlier, at)) = self.queue_removed.take()
@@ -7529,6 +7811,10 @@ impl App {
 
     /// Clears manually queued tracks while keeping the context's upcoming rows.
     fn clear_queue(&mut self) {
+        if self.mixed_active() {
+            self.mixed_clear_queue();
+            return;
+        }
         if !matches!(self.target(), Target::Local) {
             return;
         }
@@ -7693,7 +7979,7 @@ impl App {
         }
         // For local playback, reject a fetched current row that differs from
         // the engine's current track.
-        if self.local.is_active()
+        if self.local_in_charge()
             && let Some(track) = &self.local.track
             && fetched
                 .currently_playing
@@ -8400,17 +8686,28 @@ impl App {
                             known.is_active = true;
                             known.volume_percent = device.volume_percent;
                         }
-                        if let Some((wanted, _)) = self.optimistic_playing
+                        // Only a poll that started after the request can confirm
+                        // it, and Spotify may still answer the old state right
+                        // after: keep the shown state a moment past the match.
+                        if let Some((wanted, at)) = self.optimistic_playing
+                            && self.remote_polled_at > at
                             && self
                                 .remote
                                 .as_ref()
                                 .is_some_and(|remote| remote.state.is_playing == wanted)
                         {
-                            self.optimistic_playing = None;
+                            let settled = Instant::now()
+                                .checked_sub(PLAYBACK_HOLD.saturating_sub(PLAYBACK_SETTLE));
+                            if let Some(settled) = settled.filter(|settled| *settled < at) {
+                                self.optimistic_playing = Some((wanted, settled));
+                            }
                         }
                         if uri != previous_uri {
+                            // A held seek belongs to the song it was made on.
+                            self.pending_remote_position = None;
                             self.on_now_playing_changed();
                         }
+                        self.note_soloist_track();
                     }
                     Err(error) => log::debug!("playback state unavailable: {error}"),
                 }
@@ -8425,7 +8722,7 @@ impl App {
                 let writing_queue = self
                     .pending_queue_batches
                     .values()
-                    .any(|target| *target == self.target());
+                    .any(|target| *target == self.queue_write_target());
                 if writing_queue
                     || result
                         .as_ref()
@@ -8445,6 +8742,7 @@ impl App {
                     self.queue_removed = None;
                 }
                 self.queue = Loadable::from_result(result);
+                self.hide_skipped_rows();
                 self.reconcile_pending_queue();
                 if let Some(queue) = self.queue.get() {
                     let uris: Vec<String> = queue
@@ -9005,8 +9303,14 @@ impl App {
                 self.sample_playlist_tail(&id);
                 self.checkpoint_playlist_cache(&id);
                 // A sorted table means the whole list, not the loaded part.
+                let playing = self.mixed_playlist_id().as_deref() == Some(id.as_str());
+                if playing {
+                    self.mixed_requeue();
+                }
                 if self.table_sorts.contains_key(&Page::Playlist(id.clone())) {
                     self.load_more(Page::Playlist(id));
+                } else if playing {
+                    self.mixed_load_rows();
                 }
             }
             ApiResponse::PlaylistSample {
@@ -9858,6 +10162,7 @@ impl App {
                     }
                     Err(error) => {
                         self.optimistic_playing = None;
+                        self.play_wanted = None;
                         self.pending_remote_position = None;
                         if matches!(action, RemoteAction::Volume { .. }) {
                             self.pending_remote_volume = None;
@@ -9919,7 +10224,9 @@ impl App {
                 added,
                 result,
             } => {
-                if self.pending_queue_batches.remove(&request).as_ref() != Some(&self.target()) {
+                if self.pending_queue_batches.remove(&request).as_ref()
+                    != Some(&self.queue_write_target())
+                {
                     return;
                 }
                 if result.is_err() {
@@ -10541,6 +10848,9 @@ impl App {
     /// librespot then picks its own random track, and only the Web API,
     /// which would start at track one, needs telling where to go.
     fn shuffle_start(&self, context_uri: &str) -> (Option<String>, Option<u32>) {
+        if let Some(uri) = self.shuffle_local_start(context_uri) {
+            return (Some(uri), None);
+        }
         if let Some(uri) = self.random_track_in(context_uri) {
             return (Some(uri), None);
         }
@@ -10551,6 +10861,27 @@ impl App {
             return (None, Some(rand::random_range(0..len)));
         }
         (None, None)
+    }
+
+    /// In mixed playback, a local song of the playlist to open a shuffled
+    /// play with, chosen with the same odds as any song of the playlist.
+    fn shuffle_local_start(&self, context_uri: &str) -> Option<String> {
+        use crate::twerkz::mixed::{ShuffleRun, is_local};
+        if !self.mixed_active() {
+            return None;
+        }
+        let id = context_uri.strip_prefix("spotify:playlist:")?;
+        let locals: Vec<String> = self
+            .playlist_order(id)
+            .into_iter()
+            .filter(|uri| is_local(uri))
+            .collect();
+        let total = self.playlist_pages.get(id)?.items.total? as usize;
+        ShuffleRun::default().pick(
+            &locals,
+            total.saturating_sub(locals.len()),
+            rand::random::<f64>(),
+        )
     }
 
     /// Start a playlist at its first available row, not an unspecified place
@@ -10597,6 +10928,7 @@ impl App {
         }
         // Whatever starts now outranks a play-search still in flight.
         self.supersede_play_search();
+        self.mixed_shuffle = None;
         // A play from a row names its row again after this.
         self.played_row = None;
         self.resume_load = None;
@@ -10616,6 +10948,1129 @@ impl App {
         if let Some(request) = self.queued_play.take() {
             self.start_play(request, false);
         }
+    }
+
+    /// A playlist's rows in order, with the songs Spotify cannot play left
+    /// out. Empty until the playlist's first rows are loaded. Scrolled to a
+    /// distant window, the list from the top kept aside is used.
+    fn playlist_order(&self, id: &str) -> Vec<String> {
+        let Some(page) = self.playlist_pages.get(id) else {
+            return Vec::new();
+        };
+        let rows = if page.items.base_offset == 0 {
+            &page.items.items
+        } else if let Some(rows) = page.items.windows.get(&0) {
+            rows
+        } else {
+            return Vec::new();
+        };
+        rows.iter()
+            .filter_map(|row| {
+                let item = row.playable()?;
+                let local =
+                    row.is_local || matches!(item, PlayableItem::Track(track) if track.is_local);
+                let unplayable = !local
+                    && matches!(item, PlayableItem::Track(track) if track.is_playable == Some(false));
+                (!item.uri().is_empty() && !unplayable).then(|| item.uri().to_string())
+            })
+            .collect()
+    }
+
+    /// The order Soloist is playing, with its local files, unshuffled.
+    fn mixed_order(&self) -> Vec<String> {
+        match self.mixed_playlist_id() {
+            Some(id) => self.playlist_order(&id),
+            None => self.mixed_list.clone(),
+        }
+    }
+
+    fn mixed_playlist_id(&self) -> Option<String> {
+        let context = self.playing_context_uri()?;
+        context
+            .strip_prefix("spotify:playlist:")
+            .map(str::to_string)
+    }
+
+    /// Soloist's repeat mode: its last reported one, else the saved one.
+    fn mixed_repeat(&self) -> RepeatMode {
+        self.remote.as_ref().map_or(self.repeat_wanted, |remote| {
+            RepeatMode::from_api(&remote.state.repeat_state)
+        })
+    }
+
+    /// Mixed playback needs the playing playlist's whole row list to see
+    /// its local songs: keep loading it, and re-arm as rows arrive.
+    fn mixed_load_rows(&mut self) {
+        if !self.mixed_active() {
+            return;
+        }
+        let Some(id) = self.mixed_playlist_id() else {
+            return;
+        };
+        if !self
+            .playlist_pages
+            .get(&id)
+            .is_some_and(|page| page.items.loaded_once)
+        {
+            self.ensure_loaded(Page::Playlist(id.clone()));
+        }
+        if self
+            .playlist_pages
+            .get(&id)
+            .is_some_and(|page| page.items.base_offset == 0)
+        {
+            self.load_more(Page::Playlist(id));
+        }
+    }
+
+    /// Mixed playback is on and able to play local files from here. Local
+    /// songs then queue as entries of our own, since Spotify's queue refuses
+    /// them, and Spotify songs queue on Soloist, even during an interlude.
+    pub fn mixed_active(&self) -> bool {
+        self.mixed_playback()
+            && self.local_ready
+            && (self.mixed.is_some() || self.targets_own_soloist())
+    }
+
+    /// The interlude a play request that starts on a local file needs, and
+    /// the songs a plain list has left once it is over.
+    fn mixed_start(
+        &self,
+        request: &PlayRequest,
+    ) -> Option<(crate::twerkz::mixed::Interlude, Vec<String>)> {
+        use crate::twerkz::mixed::{After, Interlude, is_local, local_run, run_after};
+        if !self.mixed_active() {
+            return None;
+        }
+        let order = match request
+            .context_uri
+            .as_deref()
+            .and_then(|context| context.strip_prefix("spotify:playlist:"))
+        {
+            Some(id) => self.playlist_order(id),
+            None => request.uris.clone(),
+        };
+        let start = request.offset_uri.clone().or_else(|| {
+            request
+                .uris
+                .get(request.offset_position.unwrap_or(0) as usize)
+                .cloned()
+        })?;
+        if !is_local(&start) {
+            return None;
+        }
+        let from = match request.offset_position {
+            Some(position) if !request.uris.is_empty() => position as usize,
+            _ => order.iter().position(|uri| *uri == start)?,
+        };
+        let (locals, _) = local_run(&order, from);
+        if locals.is_empty() {
+            return None;
+        }
+        let wrap = self.mixed_repeat() == RepeatMode::Context;
+        let (next, rest) = run_after(&order, from + locals.len(), wrap);
+        let rest = if request.context_uri.is_none() {
+            rest
+        } else {
+            Vec::new()
+        };
+        let after = next.map_or(After::Nothing, |offset_uri| After::Start {
+            context_uri: request.context_uri.clone(),
+            offset_uri,
+        });
+        Some((Interlude { locals, after }, rest))
+    }
+
+    /// Plays the interlude's local files on the built-in player, as a plain
+    /// list that ends instead of repeating or carrying on.
+    fn start_interlude(&mut self, interlude: crate::twerkz::mixed::Interlude) {
+        self.local_list = None;
+        self.follow_mixed_history();
+        self.mixed_history.enter(&interlude.locals);
+        self.backend
+            .player(PlayerCommand::PlayFiles(interlude.locals.clone()));
+        self.local_takes_over(interlude.locals.first().cloned());
+        self.mixed = Some(interlude);
+        self.mixed_pending = Some(Instant::now());
+    }
+
+    fn follow_mixed_history(&mut self) {
+        if let Some(context) = self.playing_context_uri() {
+            self.mixed_history.follow(&context);
+        }
+    }
+
+    fn mixed_history_push(&mut self, uri: &str) {
+        self.follow_mixed_history();
+        self.mixed_history.push(uri);
+    }
+
+    /// Soloist still reports `uri` while a different song is about to start:
+    /// keep what is shown until it reports another.
+    fn hide_soloist_song(&mut self, uri: String) {
+        self.soloist_stale = Some((uri, Instant::now()));
+    }
+
+    /// Soloist skips (back when `previous`) with its pause armed, so the song
+    /// it lands on waits at 0. It plays once it is on `want`, or after `hops`
+    /// skips; `run` then plays on the built-in player first.
+    fn soloist_hop(&mut self, previous: bool, want: Option<String>, hops: usize, run: Vec<String>) {
+        let Some(id) = self.soloist_device_id.clone() else {
+            return;
+        };
+        self.mixed_next = None;
+        self.soloist_target = Some(SoloistTarget {
+            want,
+            hops: hops.saturating_sub(1),
+            previous,
+            run,
+            at: Instant::now(),
+        });
+        self.backend.send(Command::SoloistPauseOnTrack(true));
+        self.soloist_skip(previous, id);
+    }
+
+    fn soloist_skip(&mut self, previous: bool, id: String) {
+        let action = if previous {
+            RemoteAction::Previous
+        } else {
+            RemoteAction::Next
+        };
+        self.remote(action, Some(id));
+    }
+
+    /// Soloist reported a paused song while a silent skip is under way.
+    /// True when it was only a stop on the way, so nothing else may happen.
+    fn soloist_hop_landed(&mut self, uri: &str) -> bool {
+        use crate::twerkz::mixed::{Arrival, arrival};
+        let Some(mut target) = self.soloist_target.take() else {
+            return false;
+        };
+        if arrival(target.want.as_deref(), target.hops, uri) == Arrival::There {
+            if target.run.is_empty() {
+                return false;
+            }
+            self.mixed_last = Some(uri.to_string());
+            self.start_interlude(crate::twerkz::mixed::Interlude {
+                locals: target.run,
+                after: crate::twerkz::mixed::After::NextSoloist,
+            });
+            return true;
+        }
+        let Some(id) = self.soloist_device_id.clone() else {
+            return true;
+        };
+        self.mixed_last = Some(uri.to_string());
+        target.hops -= 1;
+        target.at = Instant::now();
+        let previous = target.previous;
+        self.soloist_target = Some(target);
+        self.backend.send(Command::SoloistPauseOnTrack(true));
+        self.soloist_skip(previous, id);
+        true
+    }
+
+    /// A silent skip that never found its song plays where it is.
+    fn check_soloist_target(&mut self) {
+        if !self
+            .soloist_target
+            .as_ref()
+            .is_some_and(|target| target.at.elapsed() >= SOLOIST_HOP_WAIT)
+        {
+            return;
+        }
+        let Some(target) = self.soloist_target.take() else {
+            return;
+        };
+        self.backend.send(Command::SoloistPauseOnTrack(false));
+        if target.run.is_empty() {
+            if let Some(id) = self.soloist_device_id.clone() {
+                self.remote(RemoteAction::Play, Some(id));
+            }
+        } else {
+            self.pause_soloist();
+            self.start_interlude(crate::twerkz::mixed::Interlude {
+                locals: target.run,
+                after: crate::twerkz::mixed::After::NextSoloist,
+            });
+        }
+    }
+
+    /// Starts `uri` on Soloist with one play request inside the playing
+    /// context (or the plain list), keeping the shuffle setting. False when
+    /// the context cannot start at a chosen song.
+    fn soloist_play_song(&mut self, uri: &str) -> bool {
+        let mut request = PlayRequest {
+            offset_uri: Some(uri.to_string()),
+            ..PlayRequest::default()
+        };
+        match self.playing_context_uri() {
+            Some(context) if crate::twerkz::mixed::starts_at_song(&context) => {
+                request.context_uri = Some(context);
+            }
+            None if self.mixed_list.iter().any(|song| song == uri) => {
+                request.uris = self.mixed_list.clone();
+            }
+            _ => return false,
+        }
+        self.start_play(request, false);
+        true
+    }
+
+    /// The built-in player is about to be heard: show `heard` playing at once.
+    fn local_takes_over(&mut self, heard: Option<String>) {
+        self.pending_local_position = None;
+        self.optimistic_playing = Some((true, Instant::now()));
+        self.intent_track = heard.map(|uri| TrackIntent {
+            uri,
+            position_ms: 0,
+            at: Instant::now(),
+            confirmation: TrackConfirmation::Local,
+        });
+    }
+
+    /// Soloist is about to be heard (the interlude is already over): show
+    /// `heard`, when known, playing at once, drop what the interlude left
+    /// behind, and ask Spotify for the real state soon.
+    fn soloist_takes_over(&mut self, heard: Option<String>) {
+        let now = Instant::now();
+        self.pending_local_position = None;
+        self.queue_start_pending = None;
+        self.optimistic_playing = Some((true, now));
+        self.intent_track = heard.map(|uri| TrackIntent {
+            uri,
+            position_ms: 0,
+            at: now,
+            confirmation: TrackConfirmation::Remote {
+                after_poll: self.remote_poll_seq,
+                mismatches: 0,
+            },
+        });
+        let id = self.soloist_device_id.clone();
+        if let Some(remote) = self.remote.as_mut()
+            && remote.state.device.as_ref().and_then(|d| d.id.clone()) == id
+        {
+            remote.state.is_playing = true;
+        }
+        self.poll_remote_soon();
+    }
+
+    fn pause_local(&mut self) {
+        if self.local.playback == Playback::Playing {
+            self.backend.player(PlayerCommand::Toggle);
+        }
+    }
+
+    fn pause_soloist(&mut self) {
+        let Some(id) = self.soloist_device_id.clone() else {
+            return;
+        };
+        let playing = self.remote_fresh().is_some_and(|remote| {
+            remote.state.is_playing
+                && remote.state.device.as_ref().and_then(|d| d.id.as_deref()) == Some(id.as_str())
+        });
+        if playing {
+            if let Some(remote) = self.remote.as_mut() {
+                remote.state.is_playing = false;
+            }
+            self.remote(RemoteAction::Pause, Some(id));
+        }
+    }
+
+    /// Ends a running interlude without following it up.
+    fn end_interlude(&mut self) {
+        self.mixed = None;
+        self.mixed_pending = None;
+        self.pause_local();
+    }
+
+    /// Forgets everything mixed playback tracks, leaving playback alone.
+    fn reset_mixed(&mut self) {
+        self.mixed = None;
+        self.mixed_pending = None;
+        self.mixed_last = None;
+        self.mixed_list.clear();
+        self.mixed_skip.clear();
+        self.mixed_shuffle = None;
+        self.mixed_history.clear();
+        self.soloist_stale = None;
+        self.mixed_disarm();
+    }
+
+    /// The interlude's last local file is done: stop the built-in player and
+    /// hand playback back to Soloist.
+    fn finish_interlude(&mut self) {
+        use crate::twerkz::mixed::After;
+        let Some(interlude) = self.mixed.take() else {
+            return;
+        };
+        self.mixed_pending = None;
+        self.pause_local();
+        if self
+            .intent_track
+            .as_ref()
+            .is_some_and(|intent| matches!(intent.confirmation, TrackConfirmation::Local))
+        {
+            self.intent_track = None;
+        }
+        match interlude.after {
+            After::ResumeSoloist { uri } => {
+                let Some(id) = self.soloist_device_id.clone() else {
+                    return;
+                };
+                self.mixed_last = Some(uri.clone());
+                self.mixed_history_push(&uri);
+                self.remote(RemoteAction::Play, Some(id));
+                self.soloist_takes_over(Some(uri));
+                self.mixed_arm();
+            }
+            After::Start {
+                context_uri,
+                offset_uri,
+            } => {
+                self.mixed_last = Some(offset_uri.clone());
+                let mut request = PlayRequest {
+                    context_uri,
+                    offset_uri: Some(offset_uri),
+                    ..PlayRequest::default()
+                };
+                if request.context_uri.is_none() {
+                    request.uris = std::mem::take(&mut self.mixed_list);
+                }
+                self.start_play(request, false);
+            }
+            After::NextSoloist => {
+                let heard = self
+                    .mixed_last
+                    .clone()
+                    .and_then(|current| self.soloist_next_song(&current));
+                if heard.is_none()
+                    && let Some(current) = self.mixed_last.clone()
+                {
+                    self.hide_soloist_song(current);
+                }
+                self.soloist_hop(false, heard.clone(), 1, Vec::new());
+                self.soloist_takes_over(heard);
+            }
+            After::Nothing => {}
+        }
+    }
+
+    /// Soloist ran out of songs. Queued local songs it could not play go on
+    /// the built-in player now, as no next song will start to trigger them.
+    fn on_soloist_idle(&mut self) {
+        use crate::twerkz::mixed::{After, Interlude};
+        if !self.mixed_active() || self.mixed.is_some() {
+            return;
+        }
+        let Some(current) = self.mixed_last.clone() else {
+            return;
+        };
+        let armed = self.mixed_next.take();
+        self.backend.send(Command::SoloistPauseOnTrack(false));
+        let Some(locals) = armed.or_else(|| self.mixed_queued_next(&current)) else {
+            return;
+        };
+        self.mixed_consume(&locals);
+        self.start_interlude(Interlude {
+            locals,
+            after: After::Nothing,
+        });
+    }
+
+    /// Drops an interlude that no longer applies and ends one that is over.
+    fn check_interlude(&mut self) {
+        if !self.mixed_playback() {
+            self.mixed = None;
+            self.mixed_pending = None;
+            return;
+        }
+        let Some(interlude) = &self.mixed else {
+            return;
+        };
+        let track = self.local.track.as_ref().map(|track| track.uri.as_str());
+        let stopped = self.local.playback == Playback::Stopped;
+        if let Some(at) = self.mixed_pending {
+            // The engine has not reported the files yet; what it still says
+            // is from before the load.
+            if !stopped && track.is_some_and(|uri| interlude.locals.iter().any(|l| l == uri)) {
+                self.mixed_pending = None;
+                return;
+            }
+            if at.elapsed() < MIXED_ENGINE_WAIT {
+                return;
+            }
+        } else if !crate::twerkz::mixed::interlude_over(interlude, track, stopped) {
+            return;
+        }
+        self.finish_interlude();
+    }
+
+    /// Soloist stopped just before `uri` ended, with its next song unstarted.
+    /// The armed local songs play now; without them Soloist goes on.
+    fn on_soloist_ending(&mut self, uri: String) {
+        let armed = self.mixed_next.take();
+        if self.mixed.is_some() {
+            return;
+        }
+        let current = self.mixed_last.clone().filter(|last| *last == uri);
+        let wanted = self.mixed_playback() && self.local_ready;
+        match (armed, current) {
+            (Some(locals), Some(current)) if wanted => self.mixed_locals_after(&current, locals),
+            _ => {
+                if let Some(id) = self.soloist_device_id.clone() {
+                    self.remote(RemoteAction::Play, Some(id));
+                }
+            }
+        }
+    }
+
+    /// Next on a Spotify song with local songs armed after it: Soloist would
+    /// start its next song audibly, so it stops here and the local songs play.
+    fn mixed_next_to_locals(&mut self) -> bool {
+        if self.mixed.is_some()
+            || !self.mixed_playback()
+            || !self.local_ready
+            || !self.targets_own_soloist()
+        {
+            return false;
+        }
+        let (Some(current), Some(id)) = (self.mixed_last.clone(), self.soloist_device_id.clone())
+        else {
+            return false;
+        };
+        let Some(locals) = self.mixed_next.take() else {
+            return false;
+        };
+        self.backend.send(Command::SoloistPauseOnTrack(false));
+        self.remote(RemoteAction::Pause, Some(id));
+        self.mixed_locals_after(&current, locals);
+        true
+    }
+
+    /// Soloist is stopped on `current`: plays `locals`, then moves Soloist on.
+    fn mixed_locals_after(&mut self, current: &str, locals: Vec<String>) {
+        use crate::twerkz::mixed::{After, Interlude};
+        if let Some(remote) = self.remote.as_mut() {
+            remote.state.is_playing = false;
+        }
+        let after = if self.playing_context_shuffle() || self.soloist_next_song(current).is_some() {
+            After::NextSoloist
+        } else {
+            After::Nothing
+        };
+        self.mixed_consume(&locals);
+        self.start_interlude(Interlude { locals, after });
+    }
+
+    /// The Spotify song Soloist plays after `current`, when the queue or the
+    /// unshuffled context order says. Shuffle leaves it unknown.
+    fn soloist_next_song(&self, current: &str) -> Option<String> {
+        let queued = self.soloist_queued();
+        let skip = usize::from(queued.first().map(String::as_str) == Some(current));
+        if let Some(next) = queued.get(skip) {
+            return Some(next.clone());
+        }
+        if self.playing_context_shuffle() {
+            return None;
+        }
+        let order = self.mixed_order();
+        let at = order.iter().position(|uri| uri == current)?;
+        let after = order[at + 1..].iter().find(|uri| !crate::twerkz::mixed::is_local(uri));
+        if self.mixed_repeat() == RepeatMode::Context {
+            return after.or_else(|| order.iter().find(|uri| !crate::twerkz::mixed::is_local(uri))).cloned();
+        }
+        after.cloned()
+    }
+
+    /// Soloist's instant song-change event. When local songs were armed to
+    /// come next, Soloist already paused at 0 and they play now; otherwise
+    /// the next ones are worked out and armed.
+    fn on_soloist_track(&mut self, uri: String, paused: bool) {
+        use crate::twerkz::mixed::{After, Interlude};
+        if paused && self.soloist_hop_landed(&uri) {
+            return;
+        }
+        let armed = self.mixed_next.take();
+        self.mixed_last = Some(uri.clone());
+        let wanted = self.mixed_playback() && self.local_ready && self.mixed.is_none();
+        if paused {
+            match armed.filter(|_| wanted) {
+                Some(locals) => {
+                    self.mixed_consume(&locals);
+                    self.start_interlude(Interlude {
+                        locals,
+                        after: After::ResumeSoloist { uri },
+                    });
+                    return;
+                }
+                // An interlude already running keeps Soloist paused behind it.
+                // If Soloist raced into its next song, it now waits at 0 there.
+                None if self.mixed.is_some() => {
+                    if let Some(interlude) = &mut self.mixed
+                        && interlude.after == After::NextSoloist
+                    {
+                        interlude.after = After::ResumeSoloist { uri: uri.clone() };
+                    }
+                }
+                None => {
+                    if let Some(id) = self.soloist_device_id.clone() {
+                        self.remote(RemoteAction::Play, Some(id));
+                    }
+                }
+            }
+        }
+        if !wanted {
+            return;
+        }
+        self.mixed_shuffle_played(&uri);
+        self.mixed_history_push(&uri);
+        self.mixed_load_rows();
+        self.mixed_arm();
+    }
+
+    /// Works out what follows Soloist's current song and arms Soloist to
+    /// pause the instant it starts when that is local songs.
+    fn mixed_arm(&mut self) {
+        let rearm = if self.soloist_target.is_some() {
+            None
+        } else {
+            self.mixed_rearm.take()
+        };
+        let next = if self.mixed_playback() && self.local_ready && self.soloist_target.is_none() {
+            rearm.or_else(|| self.mixed_upcoming())
+        } else {
+            None
+        };
+        self.backend.send(Command::SoloistPauseOnTrack(
+            next.is_some() || self.soloist_target.is_some(),
+        ));
+        self.mixed_next = next;
+    }
+
+    /// Previous across local songs in mixed playback. True when handled here.
+    fn mixed_previous(&mut self) -> bool {
+        use crate::twerkz::mixed::{After, Interlude, is_local};
+        if !self.mixed_playback() || !self.local_ready {
+            return false;
+        }
+        if self.mixed.is_some() {
+            self.interlude_previous();
+            return true;
+        }
+        let Some(id) = self.soloist_device_id.clone() else {
+            return false;
+        };
+        let position = self.now_playing().map_or(0, |now| now.position_ms);
+        if position > RESTART_BEFORE_PREVIOUS || !self.targets_own_soloist() {
+            return false;
+        }
+        let Some(current) = self.mixed_last.clone() else {
+            return false;
+        };
+        let before = self.mixed_before(&current);
+        let Some(last) = before.clone().filter(|uri| is_local(uri)) else {
+            // A Spotify song: play it straight, else skip back silently.
+            self.mixed_disarm();
+            if !before.is_some_and(|song| self.soloist_play_song(&song)) {
+                self.hide_soloist_song(current);
+                self.soloist_hop(true, None, 1, Vec::new());
+                self.soloist_takes_over(None);
+            }
+            return true;
+        };
+        self.mixed_disarm();
+        self.pause_soloist();
+        self.backend.api(ApiRequest::Remote {
+            action: RemoteAction::Seek,
+            device_id: Some(id),
+            play: None,
+            position_ms: 0,
+            percent: 0,
+            flag: false,
+            repeat: String::new(),
+        });
+        self.start_interlude(Interlude {
+            locals: vec![last],
+            after: After::ResumeSoloist { uri: current },
+        });
+        true
+    }
+
+    /// The song before Soloist's `current` that Previous goes to: the one
+    /// before it in the playing order, or in what was played when shuffled.
+    /// The history steps back with it.
+    fn mixed_before(&mut self, current: &str) -> Option<String> {
+        self.follow_mixed_history();
+        let back = self.mixed_history.step_back(current);
+        if self.playing_context_shuffle() {
+            return back;
+        }
+        let order = self.mixed_order();
+        let Some(at) = order.iter().position(|uri| uri == current) else {
+            return back;
+        };
+        let before = match at.checked_sub(1) {
+            Some(before) => before,
+            None if self.mixed_repeat() == RepeatMode::Context => order.len() - 1,
+            None => return None,
+        };
+        order.get(before).filter(|_| before != at).cloned()
+    }
+
+    /// Where the built-in player is in the running interlude. `None` until
+    /// the engine has reported its first file, as it still says what came
+    /// before the load.
+    fn interlude_index(&self) -> Option<usize> {
+        if self.mixed_pending.is_some() {
+            return None;
+        }
+        let uri = self.local.track.as_ref()?.uri.as_str();
+        self.mixed.as_ref()?.locals.iter().position(|l| l == uri)
+    }
+
+    fn restart_local(&mut self) {
+        self.pending_local_position = Some((0, Instant::now()));
+        self.backend.player(PlayerCommand::Seek(0));
+    }
+
+    /// Next while an interlude runs. The list never goes past its last file:
+    /// there the interlude ends and Soloist carries on.
+    fn interlude_next(&mut self) -> bool {
+        let Some(interlude) = &self.mixed else {
+            return false;
+        };
+        let next = self
+            .interlude_index()
+            .and_then(|at| interlude.locals.get(at + 1).cloned());
+        match next {
+            Some(uri) => {
+                self.local_takes_over(Some(uri));
+                self.backend.player(PlayerCommand::Next);
+            }
+            None => self.finish_interlude(),
+        }
+        true
+    }
+
+    /// Previous while an interlude runs: restart the file after three
+    /// seconds, else the file before it, else the song before the interlude.
+    fn interlude_previous(&mut self) {
+        use crate::twerkz::mixed::{
+            After, Interlude, local_run_before, locals_with_before, step_back,
+        };
+        let Some(interlude) = self.mixed.clone() else {
+            return;
+        };
+        let at = self.interlude_index();
+        if at.is_some()
+            && self
+                .now_playing()
+                .is_some_and(|now| now.position_ms > RESTART_BEFORE_PREVIOUS)
+        {
+            self.restart_local();
+            return;
+        }
+        if let Some(before) = at.filter(|at| *at > 0).map(|at| interlude.locals[at - 1].clone()) {
+            self.local_takes_over(Some(before));
+            self.backend.player(PlayerCommand::Previous);
+            return;
+        }
+        let Some(id) = self.soloist_device_id.clone() else {
+            self.restart_local();
+            return;
+        };
+        match interlude.after {
+            After::ResumeSoloist { uri } => {
+                let order = self.mixed_order();
+                let ordered = !self.playing_context_shuffle();
+                if ordered && let Some(locals) = step_back(&order, &uri, &interlude.locals) {
+                    self.start_interlude(Interlude {
+                        locals,
+                        after: After::ResumeSoloist { uri },
+                    });
+                    return;
+                }
+                let before = interlude
+                    .locals
+                    .first()
+                    .filter(|_| !ordered)
+                    .and_then(|first| self.mixed_history.back_from(first));
+                if let Some(locals) = locals_with_before(before.as_deref(), &interlude.locals) {
+                    self.start_interlude(Interlude {
+                        locals,
+                        after: After::ResumeSoloist { uri },
+                    });
+                    return;
+                }
+                let heard = if ordered {
+                    order
+                        .iter()
+                        .position(|u| *u == uri)
+                        .and_then(|song| {
+                            let back = local_run_before(&order, song).len() + 1;
+                            song.checked_sub(back).map(|i| order[i].clone())
+                        })
+                } else {
+                    before
+                };
+                self.end_interlude();
+                self.mixed_disarm();
+                if heard.as_deref().is_some_and(|song| self.soloist_play_song(song)) {
+                    self.mixed_rearm = Some(interlude.locals);
+                    return;
+                }
+                if heard.is_none() {
+                    self.hide_soloist_song(uri);
+                }
+                self.mixed_rearm = Some(interlude.locals);
+                self.soloist_hop(true, heard.clone(), 1, Vec::new());
+                self.soloist_takes_over(heard);
+            }
+            After::NextSoloist => {
+                self.end_interlude();
+                self.mixed_disarm();
+                self.pending_remote_position = Some((0, Instant::now()));
+                self.backend.api(ApiRequest::Remote {
+                    action: RemoteAction::Seek,
+                    device_id: Some(id.clone()),
+                    play: None,
+                    position_ms: 0,
+                    percent: 0,
+                    flag: false,
+                    repeat: String::new(),
+                });
+                self.remote(RemoteAction::Play, Some(id));
+                self.soloist_takes_over(None);
+                self.mixed_rearm = Some(interlude.locals);
+                self.mixed_arm();
+            }
+            After::Start { .. } | After::Nothing => self.restart_local(),
+        }
+    }
+
+    /// Disarms: the listener chose where to go, so nothing local cuts in.
+    fn mixed_disarm(&mut self) {
+        self.mixed_rearm = None;
+        let armed = self.mixed_next.take().is_some();
+        if self.soloist_target.take().is_some() || armed {
+            self.backend.send(Command::SoloistPauseOnTrack(false));
+        }
+    }
+
+    /// The local songs to play after Soloist's current song, if any: queued
+    /// local songs first, then the shuffle's pick, then the playlist order.
+    fn mixed_upcoming(&mut self) -> Option<Vec<String>> {
+        let current = self.mixed_last.clone()?;
+        let repeat = self.mixed_repeat();
+        if repeat == RepeatMode::Track {
+            return None;
+        }
+        if let Some(locals) = self.mixed_queued_next(&current) {
+            return Some(locals);
+        }
+        if self.playing_context_shuffle() {
+            return self.mixed_shuffle_next(&current);
+        }
+        let order = self.mixed_order();
+        let at = order.iter().position(|uri| *uri == current)?;
+        let (locals, _) = if repeat == RepeatMode::Context {
+            crate::twerkz::mixed::local_run_wrapping(&order, at + 1)
+        } else {
+            crate::twerkz::mixed::local_run(&order, at + 1)
+        };
+        (!locals.is_empty()).then_some(locals)
+    }
+
+    /// Local songs about to play: queued entries leave the queue and the
+    /// shuffle counts them as played.
+    fn mixed_consume(&mut self, locals: &[String]) {
+        self.mixed_queue_consume(locals);
+        self.mixed_shuffle_consume(locals);
+    }
+
+    /// Queued local songs due right after `current`.
+    /// A local entry's anchor is the queued song before it in `manual_queue`,
+    /// so the run due after `current` is the local entries at the front,
+    /// past `current` itself while its own row has not left yet.
+    fn mixed_queued_next(&self, current: &str) -> Option<Vec<String>> {
+        let skip = usize::from(self.manual_queue.first().map(String::as_str) == Some(current));
+        let run: Vec<String> = self.manual_queue[skip..]
+            .iter()
+            .take_while(|uri| crate::twerkz::mixed::is_local(uri))
+            .cloned()
+            .collect();
+        (!run.is_empty()).then_some(run)
+    }
+
+    fn mixed_queue_consume(&mut self, locals: &[String]) {
+        for uri in locals {
+            if self.manual_queue.first() != Some(uri) {
+                continue;
+            }
+            if let Loadable::Loaded(queue) = &mut self.queue
+                && queue.queue.first().is_some_and(|item| item.uri() == uri)
+            {
+                queue.queue.remove(0);
+            }
+            self.remove_manual_queue_row(0);
+        }
+    }
+
+    /// Removed queued songs Soloist still holds: hides one row each from a
+    /// fetched queue, and has Soloist skip them when it reaches them.
+    fn mixed_skip_rows(&mut self, uris: Vec<String>) {
+        if uris.is_empty() {
+            return;
+        }
+        self.mixed_skip.extend(uris.iter().cloned());
+        self.backend.send(Command::SoloistSkipOnTrack(uris));
+    }
+
+    fn hide_skipped_rows(&mut self) {
+        if self.mixed_skip.is_empty() || !self.mixed_active() {
+            return;
+        }
+        let Loadable::Loaded(queue) = &mut self.queue else {
+            return;
+        };
+        for uri in &self.mixed_skip {
+            if let Some(at) = queue.queue.iter().position(|item| item.uri() == uri) {
+                queue.queue.remove(at);
+            }
+        }
+    }
+
+    /// The queue's Soloist songs changed from `old` to `new` by a move.
+    /// Soloist only appends, so every song from the first difference on is
+    /// skipped where it was and queued again in its new place.
+    fn mixed_resequence(&mut self, old: &[String], new: Vec<String>) {
+        let same = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+        if same == new.len() {
+            return;
+        }
+        self.mixed_skip_rows(old[same..].to_vec());
+        let pending_start = self.pending_queue_adds.len();
+        self.write_queue_adds(new[same..].to_vec(), pending_start);
+    }
+
+    /// The Spotify songs of `manual_queue`: the ones Soloist's queue holds.
+    fn soloist_queued(&self) -> Vec<String> {
+        self.manual_queue
+            .iter()
+            .filter(|uri| !crate::twerkz::mixed::is_local(uri))
+            .cloned()
+            .collect()
+    }
+
+    /// A clicked queue row in mixed playback: Soloist skips past its own rows
+    /// above it. A local row then plays its run on the built-in player with
+    /// Soloist parked on the song before it, which moves on afterwards.
+    fn mixed_play_row(&mut self, skips: usize, run: Vec<String>, want: Option<String>) {
+        use crate::twerkz::mixed::{After, Interlude};
+        let Some(id) = self.soloist_device_id.clone() else {
+            return;
+        };
+        if self.mixed.is_some() {
+            self.end_interlude();
+        }
+        self.mixed_disarm();
+        if skips > 0 {
+            self.soloist_hop(false, want, skips, run);
+            return;
+        }
+        if run.is_empty() {
+            return;
+        }
+        self.remote(RemoteAction::Pause, Some(id));
+        self.start_interlude(Interlude {
+            locals: run,
+            after: After::NextSoloist,
+        });
+    }
+
+    /// Where queue, shuffle and repeat writes go: Soloist, even during an
+    /// interlude.
+    fn queue_write_target(&self) -> Target {
+        match &self.soloist_device_id {
+            Some(id) if self.mixed_active() => Target::Remote(Some(id.clone())),
+            _ => self.target(),
+        }
+    }
+
+    /// The queue changed: a newly queued local song is armed for the end of
+    /// the song Soloist is playing. An interlude re-arms when it ends.
+    fn mixed_requeue(&mut self) {
+        if self.mixed_active() && self.mixed.is_none() {
+            self.mixed_arm();
+        }
+    }
+
+    /// Clear queue in mixed playback takes out every queued song. Soloist's
+    /// queue cannot be cleared, so its songs are skipped as it reaches them.
+    fn mixed_clear_queue(&mut self) {
+        let mut counts: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+        for uri in &self.manual_queue {
+            *counts.entry(uri.clone()).or_insert(0) += 1;
+        }
+        if counts.is_empty() {
+            return;
+        }
+        let skipped = self.soloist_queued();
+        self.pending_album_queues.clear();
+        self.last_album_queue = None;
+        if let Loadable::Loaded(queue) = &mut self.queue {
+            queue.queue.retain(|item| match counts.get_mut(item.uri()) {
+                Some(left) if *left > 0 => {
+                    *left -= 1;
+                    false
+                }
+                _ => true,
+            });
+        }
+        while !self.manual_queue.is_empty() {
+            self.remove_manual_queue_row(0);
+        }
+        self.mixed_skip_rows(skipped);
+        self.mixed_requeue();
+        self.toast(gettext(self.locale, "Queue cleared"));
+    }
+
+    /// In a shuffled playlist, the local song (if any) to play after `current`.
+    fn mixed_shuffle_next(&mut self, current: &str) -> Option<Vec<String>> {
+        use crate::twerkz::mixed::is_local;
+        let _ = current;
+        let context = self.playing_context_uri()?;
+        let id = context.strip_prefix("spotify:playlist:")?;
+        let locals: Vec<String> = self
+            .playlist_order(id)
+            .into_iter()
+            .filter(|uri| is_local(uri))
+            .collect();
+        let total = self.playlist_pages.get(id)?.items.total? as usize;
+        let spotify_total = total.saturating_sub(locals.len());
+        let run = self.mixed_shuffle_run()?;
+        if run.counts(&locals, spotify_total) == (0, 0) {
+            run.reset();
+        }
+        let picked = run.pick(&locals, spotify_total, rand::random::<f64>())?;
+        Some(vec![picked])
+    }
+
+    /// The run of the playing context while it is shuffled; none otherwise.
+    fn mixed_shuffle_run(&mut self) -> Option<&mut crate::twerkz::mixed::ShuffleRun> {
+        let context = self.playing_context_uri().filter(|_| self.playing_context_shuffle());
+        let Some(context) = context else {
+            self.mixed_shuffle = None;
+            return None;
+        };
+        let run = self.mixed_shuffle.get_or_insert_with(Default::default);
+        run.follow(&context);
+        Some(run)
+    }
+
+    fn mixed_shuffle_consume(&mut self, locals: &[String]) {
+        if let Some(run) = self.mixed_shuffle_run() {
+            locals.iter().for_each(|uri| run.mark_played(uri));
+        }
+    }
+
+    /// Soloist started this Spotify song: the shuffle counts it as played.
+    fn mixed_shuffle_played(&mut self, uri: &str) {
+        if let Some(run) = self.mixed_shuffle_run() {
+            run.mark_played(uri);
+        }
+    }
+
+    /// Soloist's song after a remote poll. When it moved past local files it
+    /// cannot play, the built-in player plays them before Soloist goes on.
+    fn note_soloist_track(&mut self) {
+        use crate::twerkz::mixed::{
+            After, Interlude, is_local, local_run, run_after, skipped_locals,
+        };
+        let Some(id) = self.soloist_device_id.as_deref() else {
+            return;
+        };
+        let Some(current) = self
+            .remote
+            .as_ref()
+            .filter(|remote| {
+                remote.state.device.as_ref().and_then(|d| d.id.as_deref()) == Some(id)
+            })
+            .and_then(|remote| remote.state.item.as_ref())
+            .map(|item| item.uri().to_string())
+        else {
+            return;
+        };
+        let previous = self.mixed_last.replace(current.clone());
+        // Repeat one restarts the song with the same uri, so an armed pause
+        // would never see a change and fire later at an unrelated one.
+        if self.mixed_repeat() == RepeatMode::Track {
+            self.mixed_disarm();
+        }
+        // A poll that still tells of the song before a play just asked for
+        // is not Soloist moving.
+        // An armed pause is handled by the instant event instead.
+        if !self.mixed_playback()
+            || !self.local_ready
+            || self.mixed.is_some()
+            || self.mixed_next.is_some()
+            || self.soloist_target.is_some()
+            || self.intent_track.is_some()
+            || previous.as_deref() == Some(current.as_str())
+        {
+            return;
+        }
+        let order = self.mixed_order();
+        let interlude = if is_local(&current) {
+            let Some(from) = order.iter().position(|uri| *uri == current) else {
+                return;
+            };
+            let (locals, _) = local_run(&order, from);
+            if locals.is_empty() {
+                return;
+            }
+            let wrap = self.mixed_repeat() == RepeatMode::Context;
+            let (next, rest) = run_after(&order, from + locals.len(), wrap);
+            let context_uri = self.playing_context_uri();
+            if context_uri.is_none() {
+                self.mixed_list = rest;
+            }
+            Interlude {
+                locals,
+                after: next.map_or(After::Nothing, |offset_uri| After::Start {
+                    context_uri,
+                    offset_uri,
+                }),
+            }
+        } else {
+            let Some(previous) = previous.filter(|_| !self.playing_context_shuffle()) else {
+                return;
+            };
+            let locals = skipped_locals(&order, &previous, &current);
+            if locals.is_empty() {
+                return;
+            }
+            Interlude {
+                locals,
+                after: After::ResumeSoloist { uri: current },
+            }
+        };
+        self.pause_soloist();
+        if matches!(interlude.after, After::ResumeSoloist { .. })
+            && let Some(id) = self.soloist_device_id.clone()
+        {
+            self.backend.api(ApiRequest::Remote {
+                action: RemoteAction::Seek,
+                device_id: Some(id),
+                play: None,
+                position_ms: 0,
+                percent: 0,
+                flag: false,
+                repeat: String::new(),
+            });
+        }
+        self.start_interlude(interlude);
     }
 
     fn start_play(&mut self, request: PlayRequest, shuffle_first: bool) {
@@ -10641,11 +12096,15 @@ impl App {
             if shuffle {
                 (request.offset_uri, request.offset_position) = self.shuffle_start(context);
             } else if let Some(id) = context.strip_prefix("spotify:playlist:") {
-                let allow_local = !self.settings.local_folders.is_empty()
-                    && !matches!(self.target(), Target::Remote(Some(_)));
+                let allow_local = self.plays_local_files();
                 (request.offset_uri, request.offset_position) =
                     self.playlist_start(id, allow_local);
             }
+        }
+        self.mixed_disarm();
+        let mixed_start = self.mixed_start(&request);
+        if mixed_start.is_none() && self.mixed.is_some() {
+            self.end_interlude();
         }
         let mut keys: Vec<String> = Vec::new();
         if let Some(context) = &request.context_uri {
@@ -10691,6 +12150,11 @@ impl App {
         } else {
             self.intent_track = None;
         }
+        if mixed_start.is_some()
+            && let Some(intent) = &mut self.intent_track
+        {
+            intent.confirmation = TrackConfirmation::Local;
+        }
         self.set_play_pending(keys);
         if let Some(context) = request.context_uri.clone() {
             self.note_recent_context(&context);
@@ -10702,10 +12166,26 @@ impl App {
             shuffle: shuffle.then_some(true),
             at: Instant::now(),
         });
-        self.queue_start_pending = Some(self.target());
+        self.queue_start_pending = Some(if mixed_start.is_some() {
+            Target::Local
+        } else {
+            self.target()
+        });
         // Held for Soloist, never handed to the built-in player meanwhile.
         if self.soloist_waiting() {
             self.queued_play = Some(request);
+            return;
+        }
+        if let Some((interlude, rest)) = mixed_start {
+            if !self.local.connected {
+                self.queued_play = Some(request);
+                return;
+            }
+            self.queued_play = None;
+            self.mixed_list = rest;
+            self.mixed_shuffle_consume(&interlude.locals);
+            self.pause_soloist();
+            self.start_interlude(interlude);
             return;
         }
         match self.target() {
@@ -10727,6 +12207,13 @@ impl App {
             }
             Target::Remote(Some(device_id)) => {
                 self.queued_play = None;
+                if self.mixed_playback() {
+                    self.mixed_list = if request.context_uri.is_none() {
+                        request.uris.clone()
+                    } else {
+                        Vec::new()
+                    };
+                }
                 strip_local_for_remote(&mut request);
                 if shuffle {
                     self.backend.api(ApiRequest::ShufflePlay {
@@ -11113,6 +12600,12 @@ impl App {
     }
 
     fn toggle_play(&mut self) {
+        if self.mixed_pending.is_some() {
+            let playing = self.believed_playing();
+            self.backend.player(PlayerCommand::Toggle);
+            self.want_playing(!playing);
+            return;
+        }
         let playing = self.now_playing().map(|now| now.playing);
         match self.target() {
             Target::Local => {
@@ -11179,8 +12672,15 @@ impl App {
             }
         }
         if let Some(playing) = playing {
-            self.optimistic_playing = Some((!playing, Instant::now()));
+            self.want_playing(!playing);
         }
+    }
+
+    fn want_playing(&mut self, wanted: bool) {
+        let now = Instant::now();
+        self.optimistic_playing = Some((wanted, now));
+        self.play_wanted = Some((wanted, now));
+        self.shown_playing = None;
     }
 
     fn seek(&mut self, position_ms: u32) {
@@ -11191,6 +12691,7 @@ impl App {
             self.session_dirty = true;
             return;
         }
+        self.shown_position = None;
         match self.target() {
             Target::Local => {
                 self.pending_local_position = Some((position_ms, Instant::now()));
@@ -11369,6 +12870,7 @@ impl App {
     }
 
     fn set_shuffle(&mut self, shuffle: bool) {
+        self.mixed_shuffle = None;
         self.shuffle_wanted = shuffle;
         self.shuffle_set_at = Some(Instant::now());
         self.session_dirty = true;
@@ -11377,7 +12879,7 @@ impl App {
         }
         self.queue_recheck_at = Some(Instant::now() + QUEUE_RECHECK);
         self.note_shuffle_pending();
-        match self.target() {
+        match self.queue_write_target() {
             Target::Local => {
                 self.local.shuffle = shuffle;
                 self.backend.player(PlayerCommand::Shuffle(shuffle));
@@ -11452,7 +12954,7 @@ impl App {
     }
 
     fn set_repeat(&mut self, mode: RepeatMode) {
-        match self.target() {
+        match self.queue_write_target() {
             Target::Local => {
                 self.local.repeat = mode;
                 self.repeat_wanted = mode;
@@ -11474,6 +12976,8 @@ impl App {
                 });
             }
         }
+        // What follows the song depends on repeat: arm again, or clear it.
+        self.mixed_requeue();
     }
 
     /// Records only explicit choices for the currently verified account.
@@ -11485,6 +12989,7 @@ impl App {
     }
 
     fn transfer(&mut self, device_id: String) {
+        self.mixed_disarm();
         if self
             .pending_remote_volume
             .as_ref()
@@ -11518,6 +13023,7 @@ impl App {
     }
 
     fn transfer_remote(&mut self, device_id: String, play: bool) {
+        self.mixed_disarm();
         self.selected_device = Some(device_id.clone());
         self.backend.api(ApiRequest::Transfer { device_id, play });
     }
@@ -11688,7 +13194,7 @@ impl App {
             .replace("{count}", &count.to_string())
             .replace("{name}", &label),
         );
-        if self.local.is_active() && self.target() == Target::Local {
+        if self.local.is_active() && self.target() == Target::Local && !self.mixed_active() {
             for uri in uris {
                 self.backend.player(PlayerCommand::AddToQueue(uri));
             }
@@ -11765,9 +13271,11 @@ impl App {
         let pending_start = self.pending_queue_adds.len();
         let local_file = uri.starts_with("spotify:local:");
         let engine_here = self.local.is_active() && matches!(self.target(), Target::Local);
+        let mixed = self.mixed_active();
         // Another device, or Spotify's own queue, cannot reach the files on
-        // this computer. Queue a local file only on the engine here.
-        if local_file && !engine_here {
+        // this computer. Queue a local file only on the engine here, or as
+        // an entry of our own between Soloist's songs.
+        if local_file && !engine_here && !mixed {
             self.toast(gettext(
                 self.locale,
                 "Local files play on this computer only",
@@ -11781,6 +13289,14 @@ impl App {
         if announce {
             // Translators: {name} is a song, episode, album, or playlist name.
             self.toast(gettext(self.locale, "{name} added to queue").replace("{name}", &label));
+        }
+        if mixed {
+            if local_file {
+                self.mixed_requeue();
+            } else {
+                self.write_queue_adds(vec![uri], pending_start);
+            }
+            return;
         }
         // Queue tracks, episodes and local files directly on the active
         // local engine. Other targets and item types use the Web API.
@@ -11811,7 +13327,7 @@ impl App {
     }
 
     fn write_queue_adds(&mut self, uris: Vec<String>, pending_start: usize) {
-        let target = self.target();
+        let target = self.queue_write_target();
         let device_id = match &target {
             Target::Local => self.local_device_id.clone(),
             Target::Remote(device_id) => device_id.clone(),
@@ -11968,11 +13484,13 @@ impl App {
         if !self.pending_queue_batches.is_empty() {
             return;
         }
-        let engine_here = matches!(self.target(), Target::Local) && self.local.is_active();
+        let engine_here = (matches!(self.target(), Target::Local) && self.local.is_active())
+            || self.mixed_active();
         self.pending_queue_adds.retain(|addition| {
             // Spotify's queue answer can never confirm a local file queued
-            // on this computer's player. Its row stays until the track
-            // starts, the queue is cleared, or the file fails to load.
+            // on this computer's player, or between Soloist's songs. Its row
+            // stays until the track starts, the queue is cleared, or the
+            // file fails to load.
             if engine_here
                 && addition.item.uri().starts_with("spotify:local:")
                 && self
@@ -12020,6 +13538,17 @@ impl App {
                 queue.queue.insert(at, item);
             }
         }
+        // Soloist's queue lacks the local entries, so they went in beside
+        // its own rows: put the section back in `manual_queue` order.
+        if self.mixed_active()
+            && self
+                .manual_queue
+                .iter()
+                .any(|uri| crate::twerkz::mixed::is_local(uri))
+        {
+            let queued = self.queued_rows_len();
+            self.show_manual_queue_order(queued);
+        }
     }
 
     /// Answer from the rows already held locally. A found duplicate is
@@ -12054,7 +13583,20 @@ impl App {
     /// when the folder holds it (#1002).
     pub fn can_queue(&self, uri: &str) -> bool {
         !uri.starts_with(LOCAL_URI_PREFIX)
-            || (self.queue_locally_reorderable() && self.local_file(uri).is_some())
+            || ((self.queue_locally_reorderable() || self.mixed_active())
+                && self.local_file(uri).is_some())
+    }
+
+    /// Whether `uri` can go to the front of Playing next: on this computer's
+    /// queue, or in mixed playback for local songs, since Spotify cannot
+    /// insert at the front of Soloist's queue.
+    pub fn can_play_next(&self, uri: &str) -> bool {
+        self.can_queue(uri)
+            && if self.mixed_active() {
+                crate::twerkz::mixed::is_local(uri)
+            } else {
+                self.queue_locally_reorderable()
+            }
     }
 
     /// The file in the local files folder that `uri` plays from.
@@ -12476,6 +14018,16 @@ impl App {
     /// Apply one queued UI action after drawing, updating optimistic local state
     /// and scheduling any backend work or preference persistence it requires.
     pub(crate) fn apply(&mut self, action: Action, ctx: &egui::Context) {
+        let skip = matches!(action, Action::Next | Action::Previous)
+            && !self.resume_only()
+            && !self.soloist_waiting();
+        self.apply_action(action, ctx);
+        if skip {
+            self.show_song_start();
+        }
+    }
+
+    fn apply_action(&mut self, action: Action, ctx: &egui::Context) {
         // Covers buttons, row double-clicks, keyboard/media shortcuts and IPC
         // before any optimistic state or queued request can change.
         let held = self.soloist_recovering()
@@ -12740,8 +14292,12 @@ impl App {
             Action::Next if self.resume_only() => {
                 self.step_resume(true);
             }
+            Action::Next if self.interlude_next() => {}
             Action::Next => {
                 self.resume_load = None;
+                if self.mixed_next_to_locals() {
+                    return;
+                }
                 // Move the queue head to the playing row immediately. Do not
                 // pop when there is no active playback target.
                 let target = self.target();
@@ -12771,9 +14327,14 @@ impl App {
                 // the row marker stuck on the skipped-to song.
                 self.intent_track = None;
                 self.queue_start_pending = Some(self.target());
-                match self.target() {
-                    Target::Local => self.backend.player(PlayerCommand::Previous),
-                    Target::Remote(device_id) => self.remote(RemoteAction::Previous, device_id),
+                if !self.mixed_previous() {
+                    match self.target() {
+                        Target::Local => self.backend.player(PlayerCommand::Previous),
+                        Target::Remote(device_id) => {
+                            self.mixed_disarm();
+                            self.remote(RemoteAction::Previous, device_id);
+                        }
+                    }
                 }
             }
             Action::Seek(position_ms) => self.seek(position_ms),
@@ -12835,18 +14396,28 @@ impl App {
             Action::PlayNext { items } => {
                 // Unlike a positional drop, Play next must never fall back
                 // to appending if the playback target has changed.
-                if self.queue_locally_reorderable() {
+                if self.mixed_active() {
+                    // Spotify cannot insert at the front of Soloist's queue,
+                    // so only local songs play next there.
+                    let items = items
+                        .into_iter()
+                        .filter(|item| crate::twerkz::mixed::is_local(item.uri()))
+                        .collect();
+                    self.apply(Action::InsertInQueue { items, position: 0 }, ctx);
+                } else if self.queue_locally_reorderable() {
                     self.apply(Action::InsertInQueue { items, position: 0 }, ctx);
                 }
             }
             Action::MoveInQueue { from, to } => {
-                if !self.queue_locally_reorderable() {
+                let mixed = self.mixed_active();
+                if !mixed && !self.queue_locally_reorderable() {
                     return;
                 }
                 let queued_len = self.queued_rows_len();
                 if from >= queued_len || to > queued_len || from == to || to == from + 1 {
                     return;
                 }
+                let soloist_before = self.soloist_queued();
                 if from < self.manual_queue.len() {
                     let uri = self.manual_queue.remove(from);
                     let at = (if to > from { to - 1 } else { to }).min(self.manual_queue.len());
@@ -12866,11 +14437,33 @@ impl App {
                     self.show_manual_queue_order(queued_len);
                 }
                 self.session_dirty = true;
-                self.resync_local_queue();
+                if mixed {
+                    let soloist_after = self.soloist_queued();
+                    self.mixed_resequence(&soloist_before, soloist_after);
+                    self.mixed_requeue();
+                } else {
+                    self.resync_local_queue();
+                }
             }
             Action::RemoveFromQueue { rows } => self.remove_from_queue(rows),
             Action::InsertInQueue { items, position } => {
-                if !self.queue_locally_reorderable() {
+                let mixed = self.mixed_active();
+                let (items, others): (Vec<PlayableItem>, Vec<PlayableItem>) = if mixed {
+                    items
+                        .into_iter()
+                        .partition(|item| crate::twerkz::mixed::is_local(item.uri()))
+                } else {
+                    (items, Vec::new())
+                };
+                // Soloist's queue only takes songs at its end.
+                if !others.is_empty() {
+                    let songs = others
+                        .into_iter()
+                        .map(|item| (item.uri().to_string(), item.name().to_string()))
+                        .collect();
+                    self.queue_many(songs);
+                }
+                if !mixed && !self.queue_locally_reorderable() {
                     let songs = items
                         .into_iter()
                         .map(|item| (item.uri().to_string(), item.name().to_string()))
@@ -12917,7 +14510,11 @@ impl App {
                 if inserted > 0 {
                     self.session_dirty = true;
                     self.queued_toast(inserted);
-                    self.resync_local_queue();
+                    if mixed {
+                        self.mixed_requeue();
+                    } else {
+                        self.resync_local_queue();
+                    }
                 }
             }
             Action::SetSavedMany { uris, saved } => {
@@ -13702,6 +15299,13 @@ impl App {
                     enabled,
                     key: (!key.trim().is_empty()).then_some(key),
                 });
+            }
+            Action::SetMixedPlayback(enabled) => {
+                self.settings.mixed_playback = enabled;
+                self.mark_settings_dirty();
+                if enabled && !self.local_ready {
+                    self.apply(Action::EnablePlayback, ctx);
+                }
             }
             Action::RetrySoloist => {
                 // Stops whatever is left first: a player that is only slow
@@ -14795,7 +16399,7 @@ impl App {
 
     /// Keeps the current track in the window and taskbar title (#94).
     fn sync_window_title(&mut self, ctx: &egui::Context) {
-        let title = match self.now_playing().filter(|now| now.playing) {
+        let title = match self.now_playing() {
             Some(now) if now.subtitle.is_empty() => format!("{} - Spotifast", now.title),
             Some(now) => format!("{} - {}", now.subtitle, now.title),
             None => "Spotifast".to_string(),
@@ -15000,7 +16604,15 @@ impl App {
                 collapsed_folders: self.collapsed_folders.clone(),
                 rootlist: self.rootlist_cache.clone(),
                 last_added_queue: if self.resume_queue.is_empty() {
-                    self.manual_queue.clone()
+                    // Mixed playback's local entries live in this session
+                    // only: the restore hands the queue to Spotify.
+                    self.manual_queue
+                        .iter()
+                        .filter(|uri| {
+                            !(self.mixed_playback() && crate::twerkz::mixed::is_local(uri))
+                        })
+                        .cloned()
+                        .collect()
                 } else {
                     // Never resumed this session; the owed queue carries over.
                     self.resume_queue.clone()
@@ -16427,6 +18039,56 @@ mod tests {
             app.playing_context_uri().as_deref(),
             Some("spotify:playlist:phone")
         );
+    }
+
+    #[test]
+    fn a_play_pause_press_shows_its_state_once_whatever_is_reported() {
+        let mut app = headless_app();
+        app.auth = AuthStatus::Connected {
+            username: "alice".into(),
+        };
+        app.local_ready = false;
+        app.selected_device = Some("speaker".into());
+        let report = |app: &mut App, playing: bool| {
+            app.remote = Some(RemoteSnapshot {
+                state: PlaybackState {
+                    device: Some(crate::api::models::Device {
+                        id: Some("speaker".into()),
+                        name: "Speaker".into(),
+                        is_active: true,
+                        ..Default::default()
+                    }),
+                    item: Some(crate::api::models::PlayableItem::Track(
+                        crate::api::models::Track {
+                            uri: "spotify:track:song".into(),
+                            ..Default::default()
+                        },
+                    )),
+                    is_playing: playing,
+                    ..Default::default()
+                },
+                received_at: Instant::now(),
+            });
+            app.refresh_frame_now();
+            app.now_playing().unwrap().playing
+        };
+        assert!(report(&mut app, true));
+
+        app.toggle_play();
+        let mut shown = vec![report(&mut app, false)];
+        shown.push(report(&mut app, true));
+        shown.push(report(&mut app, false));
+        app.optimistic_playing = None;
+        shown.push(report(&mut app, true));
+        shown.push(report(&mut app, false));
+        assert_eq!(shown, [false; 5], "no flip back to the old state");
+
+        app.play_wanted = app.play_wanted.map(|(wanted, _)| {
+            (wanted, Instant::now() - PLAY_CONFIRM - Duration::from_millis(1))
+        });
+        assert!(!report(&mut app, false));
+        assert!(app.play_wanted.is_none(), "the hold ends once they agree");
+        assert!(report(&mut app, true), "later reports are shown as they are");
     }
 
     /// #1069: an artist's compilations have a category of their own, which
@@ -23530,6 +25192,329 @@ mod tests {
     fn soloist_is_due(app: &mut App, ctx: &egui::Context) {
         app.soloist_retry_at = Some(Instant::now());
         app.retry_soloist_when_due(ctx);
+    }
+
+    fn mixed_app(name: &str) -> (egui::Context, App) {
+        let (ctx, mut app) = listening_on_soloist(name);
+        app.settings.mixed_playback = true;
+        app.local_ready = true;
+        app.local.connected = true;
+        (ctx, app)
+    }
+
+    fn files_sent(app: &App) -> Vec<Vec<String>> {
+        app.backend
+            .take_player_commands()
+            .into_iter()
+            .filter_map(|command| match command {
+                PlayerCommand::PlayFiles(uris) => Some(uris),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_local_song_in_mixed_playback_plays_on_the_built_in_player() {
+        use crate::twerkz::mixed::After;
+        let (_ctx, mut app) = mixed_app("mixed-start-local");
+        let (l1, l2, next) = ("spotify:local:a", "spotify:local:b", "spotify:track:next");
+        app.start_play(
+            PlayRequest::tracks(vec![l1.into(), l2.into(), next.into()]).starting_at_uri(l1),
+            false,
+        );
+        let files = files_sent(&app);
+        assert_eq!(files, vec![vec![l1.to_string(), l2.to_string()]]);
+        assert!(app.backend.take_remote_play_requests().is_empty());
+        let interlude = app.mixed.clone().unwrap();
+        assert_eq!(interlude.locals, vec![l1.to_string(), l2.to_string()]);
+        assert_eq!(
+            interlude.after,
+            After::Start {
+                context_uri: None,
+                offset_uri: next.into()
+            }
+        );
+        app.backend.shutdown();
+    }
+
+    #[test]
+    fn soloist_moving_past_local_files_starts_an_interlude() {
+        use crate::twerkz::mixed::After;
+        let (_ctx, mut app) = mixed_app("mixed-skipped-locals");
+        let local = "spotify:local:a";
+        app.mixed_list = vec!["spotify:track:one".into(), local.into(), "spotify:track:two".into()];
+        for uri in ["spotify:track:one", "spotify:track:two"] {
+            app.remote = Some(RemoteSnapshot {
+                state: PlaybackState {
+                    device: Some(Device {
+                        id: Some("own".into()),
+                        ..Default::default()
+                    }),
+                    item: Some(PlayableItem::Track(Track {
+                        uri: uri.into(),
+                        ..Default::default()
+                    })),
+                    is_playing: true,
+                    ..Default::default()
+                },
+                received_at: Instant::now(),
+            });
+            app.note_soloist_track();
+        }
+        let interlude = app.mixed.clone().unwrap();
+        assert_eq!(interlude.locals, vec![local.to_string()]);
+        assert_eq!(
+            interlude.after,
+            After::ResumeSoloist {
+                uri: "spotify:track:two".into()
+            }
+        );
+        assert_eq!(files_sent(&app)[0], vec![local.to_string()]);
+        app.backend.shutdown();
+    }
+
+    fn running_interlude(
+        app: &mut App,
+        locals: &[&str],
+        current: &str,
+        after: crate::twerkz::mixed::After,
+    ) {
+        app.mixed = Some(crate::twerkz::mixed::Interlude {
+            locals: locals.iter().map(|uri| uri.to_string()).collect(),
+            after,
+        });
+        app.mixed_pending = None;
+        app.local.playback = Playback::Playing;
+        app.local.track = Some(crate::player::LocalTrack {
+            uri: current.into(),
+            ..Default::default()
+        });
+    }
+
+    #[test]
+    fn next_on_the_last_local_song_hands_back_to_soloist() {
+        use crate::twerkz::mixed::After;
+        let (ctx, mut app) = mixed_app("mixed-next-last-local");
+        let (l1, l2, song) = ("spotify:local:a", "spotify:local:b", "spotify:track:two");
+        running_interlude(&mut app, &[l1, l2], l2, After::ResumeSoloist { uri: song.into() });
+        app.apply(Action::Next, &ctx);
+        assert!(app.mixed.is_none());
+        assert!(
+            !app.backend
+                .take_player_commands()
+                .iter()
+                .any(|command| matches!(command, PlayerCommand::Next))
+        );
+        assert_eq!(app.backend.take_remote_play_requests().len(), 1);
+        let intent = app.intent_track.as_ref().unwrap();
+        assert_eq!(intent.uri, song);
+        assert!(matches!(intent.confirmation, TrackConfirmation::Remote { .. }));
+        assert!(matches!(app.optimistic_playing, Some((true, _))));
+        app.backend.shutdown();
+    }
+
+    #[test]
+    fn next_between_local_songs_points_at_the_next_one() {
+        use crate::twerkz::mixed::After;
+        let (ctx, mut app) = mixed_app("mixed-next-middle-local");
+        let (l1, l2) = ("spotify:local:a", "spotify:local:b");
+        running_interlude(&mut app, &[l1, l2], l1, After::Nothing);
+        app.apply(Action::Next, &ctx);
+        assert!(app.mixed.is_some());
+        assert!(
+            app.backend
+                .take_player_commands()
+                .iter()
+                .any(|command| matches!(command, PlayerCommand::Next))
+        );
+        let intent = app.intent_track.as_ref().unwrap();
+        assert_eq!(intent.uri, l2);
+        assert!(matches!(intent.confirmation, TrackConfirmation::Local));
+        app.backend.shutdown();
+    }
+
+    #[test]
+    fn previous_on_the_first_local_song_returns_soloist_to_the_start_of_its_song() {
+        use crate::twerkz::mixed::After;
+        let (ctx, mut app) = mixed_app("mixed-previous-first-local");
+        let l1 = "spotify:local:a";
+        running_interlude(&mut app, &[l1], l1, After::NextSoloist);
+        app.apply(Action::Previous, &ctx);
+        assert!(app.mixed.is_none());
+        assert!(matches!(app.pending_remote_position, Some((0, _))));
+        assert_eq!(app.backend.take_remote_play_requests().len(), 1);
+        assert!(
+            !app.backend
+                .take_player_commands()
+                .iter()
+                .any(|command| matches!(command, PlayerCommand::Previous))
+        );
+        assert!(matches!(app.optimistic_playing, Some((true, _))));
+        assert_eq!(app.mixed_next, Some(vec![l1.to_string()]));
+        app.backend.shutdown();
+    }
+
+    #[test]
+    fn a_silent_skip_plays_only_once_it_is_on_the_wanted_song() {
+        let (_ctx, mut app) = mixed_app("mixed-silent-hops");
+        app.mixed_last = Some("spotify:track:now".into());
+        app.mixed_play_row(2, Vec::new(), Some("spotify:track:b".into()));
+        assert!(app.soloist_target.is_some());
+        app.on_soloist_track("spotify:track:a".into(), true);
+        assert!(app.backend.take_remote_play_requests().is_empty());
+        assert!(app.soloist_target.is_some());
+        app.on_soloist_track("spotify:track:b".into(), true);
+        assert_eq!(app.backend.take_remote_play_requests().len(), 1);
+        assert!(app.soloist_target.is_none());
+        app.backend.shutdown();
+    }
+
+    #[test]
+    fn a_silent_skip_that_never_arrives_plays_where_it_is() {
+        let (_ctx, mut app) = mixed_app("mixed-silent-timeout");
+        app.mixed_play_row(2, Vec::new(), Some("spotify:track:b".into()));
+        app.check_soloist_target();
+        assert!(app.backend.take_remote_play_requests().is_empty());
+        app.soloist_target.as_mut().unwrap().at =
+            Instant::now().checked_sub(SOLOIST_HOP_WAIT).unwrap();
+        app.check_soloist_target();
+        assert_eq!(app.backend.take_remote_play_requests().len(), 1);
+        assert!(app.soloist_target.is_none());
+        app.backend.shutdown();
+    }
+
+    #[test]
+    fn previous_to_a_spotify_song_starts_it_with_one_request() {
+        let (ctx, mut app) = mixed_app("mixed-previous-offset");
+        let (one, two) = ("spotify:track:one", "spotify:track:two");
+        app.mixed_list = vec![one.into(), two.into()];
+        app.mixed_last = Some(two.into());
+        app.apply(Action::Previous, &ctx);
+        assert!(app.soloist_target.is_none());
+        let requests = app.backend.take_remote_play_requests();
+        assert_eq!(requests.len(), 1);
+        assert!(matches!(
+            &requests[0],
+            ApiRequest::Remote { play: Some(play), .. } if play.offset_uri.as_deref() == Some(one)
+        ));
+        assert_eq!(app.intent_track.as_ref().unwrap().uri, one);
+        app.backend.shutdown();
+    }
+
+    /// Soloist's queue refuses a local file, so mixed playback keeps its own
+    /// entry: it shows in place, is never sent anywhere, and stays when a
+    /// fetched queue without it arrives.
+    #[test]
+    fn a_local_song_queues_between_soloists_songs() {
+        const L1: &str = "spotify:local:a:one:a:1";
+        const L2: &str = "spotify:local:a:two:a:2";
+        let (ctx, mut app) = mixed_app("mixed-queue-local");
+        app.local_index = Some(local_index(&[(L1, "/music/one.mp3"), (L2, "/music/two.mp3")]));
+        app.queue = loaded_queue("spotify:track:now", &["spotify:track:ctx"]);
+        app.mixed_last = Some("spotify:track:now".into());
+        assert!(app.can_queue(L1));
+        for (uri, label) in [(L1, "One"), (L2, "Two"), ("spotify:track:x", "X")] {
+            app.apply(
+                Action::AddToQueue {
+                    uri: uri.into(),
+                    label: label.into(),
+                },
+                &ctx,
+            );
+        }
+        assert_eq!(app.manual_queue, [L1, L2, "spotify:track:x"]);
+        assert!(app.backend.take_player_commands().is_empty());
+        assert_eq!(app.mixed_next, Some(vec![L1.to_string(), L2.to_string()]));
+
+        app.queue = loaded_queue("spotify:track:now", &["spotify:track:x", "spotify:track:ctx"]);
+        app.reconcile_pending_queue();
+        assert_eq!(
+            queue_uris(&app).1,
+            [L1, L2, "spotify:track:x", "spotify:track:ctx"]
+        );
+        app.backend.shutdown();
+    }
+
+    /// A local entry's anchor is the queued song before it: it is due after
+    /// that song, leaves with its run, and can be removed alone.
+    #[test]
+    fn queued_local_songs_are_due_after_the_song_they_follow() {
+        const L1: &str = "spotify:local:a:one:a:1";
+        const L2: &str = "spotify:local:a:two:a:2";
+        const X: &str = "spotify:track:x";
+        let (ctx, mut app) = mixed_app("mixed-queue-anchor");
+        app.local_index = Some(local_index(&[(L1, "/music/one.mp3"), (L2, "/music/two.mp3")]));
+        app.queue = loaded_queue("spotify:track:now", &[L1, X, L2, "spotify:track:ctx"]);
+        app.manual_queue = vec![L1.into(), X.into(), L2.into()];
+        app.mixed_last = Some("spotify:track:now".into());
+        assert_eq!(
+            app.mixed_queued_next("spotify:track:now"),
+            Some(vec![L1.to_string()])
+        );
+
+        app.mixed_queue_consume(&[L1.to_string()]);
+        assert_eq!(app.manual_queue, [X, L2]);
+        assert_eq!(queue_uris(&app).1, [X, L2, "spotify:track:ctx"]);
+        assert_eq!(app.mixed_queued_next("spotify:track:now"), None);
+        assert_eq!(app.mixed_queued_next(X), Some(vec![L2.to_string()]));
+
+        app.apply(
+            Action::RemoveFromQueue {
+                rows: vec![(0, X.into()), (1, L2.into())],
+            },
+            &ctx,
+        );
+        assert!(app.manual_queue.is_empty());
+        assert_eq!(queue_uris(&app).1, ["spotify:track:ctx"]);
+        assert_eq!(app.mixed_skip, [X]);
+        app.backend.shutdown();
+    }
+
+    /// Soloist's queue only takes songs at its end: a removed, cleared or
+    /// moved Spotify row stays hidden and is skipped when Soloist reaches it.
+    #[test]
+    fn soloists_queued_rows_clear_and_move_by_skipping() {
+        const L: &str = "spotify:local:a:one:a:1";
+        const X: &str = "spotify:track:x";
+        const Y: &str = "spotify:track:y";
+        let (ctx, mut app) = mixed_app("mixed-queue-skip");
+        app.queue = loaded_queue("spotify:track:now", &[X, L, Y, "spotify:track:ctx"]);
+        app.manual_queue = vec![X.into(), L.into(), Y.into()];
+        app.mixed_last = Some("spotify:track:now".into());
+        assert!(app.can_remove_from_queue(0) && app.can_clear_queue());
+
+        app.apply(Action::MoveInQueue { from: 0, to: 3 }, &ctx);
+        assert_eq!(app.manual_queue, [L, Y, X]);
+        assert_eq!(app.mixed_skip, [X, Y]);
+
+        app.mixed_skip = vec![X.into(), Y.into()];
+        app.queue = loaded_queue("spotify:track:now", &[X, Y, "spotify:track:ctx"]);
+        app.hide_skipped_rows();
+        assert_eq!(queue_uris(&app).1, ["spotify:track:ctx"]);
+
+        app.mixed_skip.clear();
+        app.mixed_clear_queue();
+        assert!(app.manual_queue.is_empty());
+        assert_eq!(app.mixed_skip, [Y, X]);
+        app.backend.shutdown();
+    }
+
+    /// With nothing after Soloist's last song no song start comes, so its
+    /// going idle starts the queued local songs.
+    #[test]
+    fn local_songs_queued_after_soloists_last_song_play_once_it_goes_idle() {
+        use crate::{soloist::Update, twerkz::mixed::After};
+        const L: &str = "spotify:local:a:one:a:1";
+        let (_ctx, mut app) = mixed_app("mixed-queue-idle");
+        app.queue = loaded_queue("spotify:track:now", &[L]);
+        app.manual_queue = vec![L.into()];
+        app.mixed_last = Some("spotify:track:now".into());
+        app.on_soloist(Update::Idle);
+        let interlude = app.mixed.clone().unwrap();
+        assert_eq!(interlude.locals, [L]);
+        assert_eq!(interlude.after, After::Nothing);
+        assert!(app.manual_queue.is_empty());
+        app.backend.shutdown();
     }
 
     /// The report behind the banner: a player that stopped put a returning
