@@ -408,7 +408,16 @@ pub struct Settings {
     pub mac_show_in_dock: bool,
     /// Ask GitHub once a day whether a newer release exists.
     pub check_for_updates: bool,
-    pub download_updates_automatically: bool,
+    /// A newer release on the same major version downloads in the
+    /// background and installs at the next start (fastframe-update's
+    /// `policy`). Replaces `download_updates_automatically`, which only
+    /// downloaded and was off by default; that key is no longer read, so
+    /// every copy starts with this on.
+    pub update_automatically: bool,
+    /// The newest version that ran on this computer, so a person who went
+    /// back to an older one is not updated past it on its own.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub newest_run: Option<String>,
     /// Context URIs and the local Liked Songs key, in pin order.
     pub pinned_contexts: Vec<String>,
     /// Older settings keep Liked Songs first until it is moved or unpinned.
@@ -581,7 +590,8 @@ impl Default for Settings {
             mac_notch_widget: false,
             mac_show_in_dock: true,
             check_for_updates: true,
-            download_updates_automatically: false,
+            update_automatically: true,
+            newest_run: None,
             pinned_contexts: Vec::new(),
             liked_songs_pinned: true,
             sidebar_order: Vec::new(),
@@ -592,7 +602,9 @@ impl Default for Settings {
             winamp_window: false,
             winamp_show_taskbar: true,
             custom_titlebar: false,
-            skin: None,
+            // New installs open the mini player in our own wide skin; a file
+            // that says null keeps the classic one it chose.
+            skin: Some(crate::skin::WIDE.into()),
             random_skin: false,
             skin_scale: None,
             winamp_on_top: false,
@@ -1421,11 +1433,16 @@ mod tests {
     }
 
     #[test]
-    fn older_settings_keep_the_winamp_window_closed_and_the_built_in_skin() {
+    fn older_settings_keep_the_winamp_window_closed_and_get_our_wide_skin() {
         let settings: Settings = serde_json::from_str(r#"{"zoom": 1.2}"#).unwrap();
         assert!(!settings.winamp_window);
         assert!(settings.winamp_show_taskbar);
-        assert_eq!(settings.skin, None);
+        assert_eq!(settings.skin.as_deref(), Some(crate::skin::WIDE));
+        let chose_classic: Settings = serde_json::from_str(r#"{"skin": null}"#).unwrap();
+        assert_eq!(
+            chose_classic.skin, None,
+            "a saved choice of the classic skin stays"
+        );
         assert_eq!(settings.skin_scale, None);
         assert!(!settings.winamp_on_top);
         assert_eq!(settings.vis, super::VisMode::Bars);
