@@ -57,6 +57,8 @@ const HAZY_SUNG_LINE_AT: f32 = 0.5;
 const HAZY_GROWTH: f32 = 1.05;
 const HAZY_FADE_SECONDS: f32 = 0.2;
 const HAZY_SCROLL_SECONDS: f32 = 0.35;
+/// Full screen lines are big, so they glide to the next one more slowly.
+const FULLSCREEN_SCROLL_SECONDS: f32 = 0.65;
 /// Space between lines, as a fraction of the font size.
 const HAZY_LINE_GAP: f32 = 0.475;
 
@@ -1009,7 +1011,8 @@ fn fullscreen_contents(app: &mut App, ui: &mut egui::Ui) {
     let manual_scroll = ui.rect_contains_pointer(viewport)
         && ui.input(|input| {
             input.smooth_scroll_delta.y != 0.0
-                || (input.pointer.primary_down() && input.pointer.delta().y != 0.0)
+                // A click that wobbles is still a click on a line, not a drag.
+                || (input.pointer.is_decidedly_dragging() && input.pointer.delta().y != 0.0)
         });
     let following = app.lyrics_following && !manual_scroll;
     let hazy = app.settings.hazy_active();
@@ -1019,7 +1022,7 @@ fn fullscreen_contents(app: &mut App, ui: &mut egui::Ui) {
     let animation = if hazy && (resized || app.lyrics_line_shown.is_none()) {
         egui::style::ScrollAnimation::none()
     } else {
-        crate::motion::scroll(ui.ctx(), if hazy { HAZY_SCROLL_SECONDS } else { 0.45 })
+        crate::motion::scroll(ui.ctx(), FULLSCREEN_SCROLL_SECONDS)
     };
     let size = (ui.available_width() * 0.046).clamp(28.0, 42.0);
     // The line being sung takes the theme's accent, though the view is
