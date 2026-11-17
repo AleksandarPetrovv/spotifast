@@ -34,13 +34,13 @@ const SEARCH_FLOOR: f32 = 130.0;
 // Keep the original 80-point minimum inside the page's own toolbar.
 const SEARCH_MIN: f32 = 80.0;
 /// Everything at the right end whose width never changes: the page padding,
-/// the avatar, the gap the account menu leaves, the settings and visualiser
-/// buttons, and the spacing between them. The cursor stops at the left edge
-/// of the last button, so this counts two gaps, not three. The theme button,
-/// the spinner and the badges are measured on top of it because they come
-/// and go.
+/// the avatar, the gap the account menu leaves, the listening activity,
+/// settings and visualiser buttons, and the spacing between them. The cursor
+/// stops at the left edge of the last button, so this counts three gaps, not
+/// four. The theme button, the spinner and the badges are measured on top of
+/// it because they come and go.
 const RIGHT_CONTROLS_WIDTH: f32 =
-    super::widgets::PAGE_PADDING + AVATAR_SIZE + 4.0 + 2.0 * ICON_BUTTON_SIZE + 2.0 * ITEM_SPACING;
+    super::widgets::PAGE_PADDING + AVATAR_SIZE + 4.0 + 3.0 * ICON_BUTTON_SIZE + 3.0 * ITEM_SPACING;
 
 /// What precedes the field until the bar has drawn once: the page padding,
 /// the back and forward buttons and the gaps after them.
@@ -556,6 +556,22 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     ));
                 }
                 ui.add_space(4.0);
+                if theme::icon_button(
+                    ui,
+                    Icon::Users,
+                    ICON_BUTTON_ICON,
+                    if app.show_friends_panel {
+                        palette.accent
+                    } else {
+                        palette.secondary
+                    },
+                    palette.text,
+                    &gettext(locale, "Listening activity"),
+                )
+                .clicked()
+                {
+                    app.actions.push(Action::ToggleFriendsPanel);
+                }
                 if theme::icon_button(
                     ui,
                     Icon::Settings,
