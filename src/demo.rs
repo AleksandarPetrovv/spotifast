@@ -1284,7 +1284,6 @@ pub fn apply_flags(app: &mut App, page: Option<&str>, show: Option<&str>) {
             "soloist-onboarding" => {
                 app.soloist_onboarding = crate::settings::SoloistOnboarding::Setup;
             }
-            "soloist-settled" => app.soloist_settled = true,
             "soloist-optional" => app.soloist_setup_optional = true,
             "soloist-home" => app.open(Page::Home),
             // Past the waits that change what a step says.
@@ -1311,7 +1310,6 @@ pub fn apply_flags(app: &mut App, page: Option<&str>, show: Option<&str>) {
                     app.open(Page::Settings);
                 }
                 app.settings.soloist_enabled = surface != "soloist-setup";
-                app.soloist_settled = surface != "soloist-verifying";
                 app.soloist_status = match surface {
                     "soloist-starting" => Status::Starting,
                     "soloist-needs-key" => Status::NeedsKey,
@@ -9779,10 +9777,7 @@ mod tests {
     fn connection_status_centers_the_spinner_and_translated_label_together() {
         use clap::ValueEnum;
         for &locale in crate::i18n::Locale::value_variants() {
-            for (flag, message) in [
-                ("connecting", "Connecting to Spotify…"),
-                ("soloist-verifying", "Verifying Soloist…"),
-            ] {
+            for (flag, message) in [("connecting", "Connecting to Spotify…")] {
                 let (ctx, mut app) = accessible_app("loading-status-centered");
                 app.backend.set_offline(true);
                 apply_flags(&mut app, None, Some(flag));
@@ -9815,7 +9810,7 @@ mod tests {
 
     #[cfg(feature = "demo")]
     #[test]
-    fn soloist_verification_uses_the_sign_in_loading_screen() {
+    fn soloist_verification_opens_the_library_at_once() {
         let (ctx, mut app) = accessible_app("soloist-verifying");
         app.backend.set_offline(true);
         apply_flags(&mut app, None, Some("soloist-verifying"));
@@ -9829,15 +9824,13 @@ mod tests {
             App::frame_ui,
             egui::vec2(1280.0, 800.0),
         );
-        assert!(texts.iter().any(|(text, _)| text == "Verifying Soloist…"));
         assert!(
-            texts
+            !texts
                 .iter()
                 .any(|(text, _)| text == "A native Spotify client.")
         );
         assert!(
-            !tree
-                .nodes
+            tree.nodes
                 .iter()
                 .any(|(_, node)| node.label() == Some("Next"))
         );

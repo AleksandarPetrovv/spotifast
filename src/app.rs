@@ -259,7 +259,6 @@ pub struct NowPlaying {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SoloistView {
     App,
-    Loading,
     Setup,
 }
 
@@ -523,8 +522,6 @@ pub struct App {
     soloist_select: bool,
     /// When `soloist_status` last became what it is now.
     pub(crate) soloist_status_at: Instant,
-    /// The app has opened since sign-in, so the loading screen stays away.
-    pub(crate) soloist_settled: bool,
     /// When Spotifast next starts a stopped player by itself.
     pub(crate) soloist_retry_at: Option<Instant>,
     soloist_retries: usize,
@@ -1099,9 +1096,6 @@ const TRAY_WAIT: Duration = Duration::from_secs(30);
 const STARTS_WINDOWED: bool =
     cfg!(windows) || (cfg!(target_os = "linux") && !cfg!(feature = "demo"));
 
-/// How long a returning listener may see the loading screen for one step of
-/// Soloist's start. Past this the app opens and a banner carries on.
-const SOLOIST_LOADING_GRACE: Duration = Duration::from_secs(10);
 /// Every start reports pairing until Soloist answers, and a dropped session
 /// usually comes back. Only past this does it need the listener.
 pub(crate) const SOLOIST_PAIRING_GRACE: Duration = Duration::from_secs(20);
@@ -1362,7 +1356,6 @@ impl App {
             soloist_update: None,
             soloist_select: false,
             soloist_status_at: Instant::now(),
-            soloist_settled: false,
             soloist_retry_at: None,
             soloist_retries: 0,
             soloist_bound_at: None,
@@ -1883,16 +1876,12 @@ impl App {
     /// have not finished it. Once they have, nothing Soloist does takes the
     /// app away: a stopped player is a banner over a working library.
     pub fn soloist_view(&self) -> SoloistView {
-        use crate::soloist::Status;
+        // twerkz: the library opens at once from what was cached; Soloist
+        // starts behind it, with the banner saying so.
         if self.show_soloist_onboarding() {
             SoloistView::Setup
-        } else if !self.soloist_waiting()
-            || self.soloist_settled
-            || matches!(self.soloist_status, Status::NeedsKey | Status::Failed(_))
-        {
-            SoloistView::App
         } else {
-            SoloistView::Loading
+            SoloistView::App
         }
     }
 
@@ -3573,7 +3562,6 @@ impl App {
     /// their player back by itself a few times. During setup only a sign-in
     /// still being verified retries: anything else needs them to read it.
     fn schedule_soloist_retry(&mut self, failure: &crate::soloist::Failure) {
-        self.soloist_settled = true;
         if self
             .soloist_bound_at
             .take()
@@ -3642,7 +3630,6 @@ impl App {
         self.soloist_device_id = device.as_ref().and_then(|device| device.id.clone());
         self.backend.send(Command::SoloistDevice(device));
         if newly_bound && let Some(id) = self.soloist_device_id.clone() {
-            self.soloist_settled = true;
             self.soloist_retry_at = None;
             self.soloist_bound_at = Some(Instant::now());
             // A setup resumed from an earlier run has nothing left to show.
@@ -3709,7 +3696,6 @@ impl App {
                 self.soloist_audio = false;
                 self.soloist_update = None;
                 self.soloist_select = false;
-                self.soloist_settled = false;
                 self.soloist_retries = 0;
                 self.soloist_resume = false;
                 self.soloist_give_up();
@@ -4816,14 +4802,7 @@ impl App {
         if self.queued_play.is_some() && self.soloist_waiting() && !self.soloist_recovering() {
             self.soloist_give_up();
         }
-        if self.soloist_view() == SoloistView::Loading {
-            let waited = self.soloist_status_at.elapsed();
-            if self.is_connected() && waited >= SOLOIST_LOADING_GRACE {
-                self.soloist_settled = true;
-            } else {
-                ctx.request_repaint_after(SOLOIST_LOADING_GRACE.saturating_sub(waited));
-            }
-        } else if self.soloist_recovering()
+        if self.soloist_recovering()
             && self.soloist_status_at.elapsed() < SOLOIST_PAIRING_GRACE
         {
             ctx.request_repaint_after(
@@ -25540,14 +25519,11 @@ mod tests {
             ] {
                 app.apply(action, &ctx);
             }
-            assert!(app.intent_track.is_none());
-            assert!(app.played_row.is_none());
-            assert!(!app.any_play_pending());
-            assert!(app.optimistic_playing.is_none());
+            // The library is open meanwhile, but nothing reaches Spotify.
             assert!(app.selected_device.is_none());
-            assert!(!app.shuffle_wanted);
             assert!(app.backend.take_remote_play_requests().is_empty());
         }
+        app.shuffle_wanted = false;
         app.on_soloist(Update::Status(ready));
         assert_eq!(app.soloist_wait_message(), "Verifying Soloist…");
         app.devices = vec![Device {

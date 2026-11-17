@@ -60,11 +60,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let soloist_view = app.soloist_view();
     if soloist_view != crate::app::SoloistView::App {
         player_bar::end_tint_session(ctx);
-        if soloist_view == crate::app::SoloistView::Loading {
-            login::show(app, ui, true);
-        } else {
-            soloist::onboarding(app, ui);
-        }
+        soloist::onboarding(app, ui);
         toasts(app, ctx, 20.0);
         caption_buttons(ui, &app.palette, app.locale);
         fastframe_titlebar::resize(ui);
