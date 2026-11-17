@@ -918,10 +918,13 @@ fn native_options(
             }
         }
     };
+    let remembered_window = persist_window && inner_size.is_none();
     eframe::NativeOptions {
         viewport,
         persist_window,
         persistence_path,
+        window_builder: remembered_window
+            .then(|| Box::new(spotifast::window::at_least_min_size) as eframe::WindowBuilderHook),
         ..Default::default()
     }
 }

@@ -194,6 +194,16 @@ pub fn usable_size(size: Option<[f32; 2]>) -> Option<[f32; 2]> {
     size.filter(|size| size[0] >= MAIN_MIN_SIZE[0] && size[1] >= MAIN_MIN_SIZE[1])
 }
 
+/// `builder` with its size raised to the main window's minimum. eframe
+/// restores its own saved window over the session's size, and a window saved
+/// while minimized or hidden is saved at about zero.
+pub fn at_least_min_size(builder: egui::ViewportBuilder) -> egui::ViewportBuilder {
+    match builder.inner_size {
+        Some(size) => builder.with_inner_size(size.max(MAIN_MIN_SIZE.into())),
+        None => builder,
+    }
+}
+
 static FIXED_SIZE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Whether the main window keeps one size it was given, as demo shots ask,
@@ -376,5 +386,16 @@ mod tests {
         for size in [MAIN_MIN_SIZE, [1240.0, 800.0], [1920.0, 1129.0]] {
             assert_eq!(usable_size(Some(size)), Some(size));
         }
+    }
+
+    #[test]
+    fn a_built_window_is_raised_to_the_minimum_size() {
+        let built = |size: [f32; 2]| {
+            at_least_min_size(egui::ViewportBuilder::default().with_inner_size(size)).inner_size
+        };
+        assert_eq!(built([10.0, 10.0]), Some(MAIN_MIN_SIZE.into()));
+        assert_eq!(built([64.0, 900.0]), Some(egui::vec2(MAIN_MIN_SIZE[0], 900.0)));
+        assert_eq!(built([1240.0, 800.0]), Some(egui::vec2(1240.0, 800.0)));
+        assert_eq!(at_least_min_size(egui::ViewportBuilder::default()).inner_size, None);
     }
 }
