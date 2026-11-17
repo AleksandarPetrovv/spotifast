@@ -12773,6 +12773,15 @@ impl App {
             return;
         }
         let playing = self.now_playing().map(|now| now.playing);
+        // The bar shows the remembered song at its saved place; play starts
+        // it there, not where Spotify last had it.
+        if self.resume_only() && self.resume_last() {
+            return;
+        }
+        if playing == Some(true) {
+            // Saves the place it was paused at, in case the app is killed.
+            self.session_dirty = true;
+        }
         match self.target() {
             Target::Local => {
                 if self.local.is_active() {
