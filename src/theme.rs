@@ -538,6 +538,7 @@ fastframe_icons::icons! {
         Zap => "zap",
         Download => "download",
         FolderOpen => "folder-open",
+        Funnel => "funnel",
         MusicPlus => "music-plus",
     }
 }

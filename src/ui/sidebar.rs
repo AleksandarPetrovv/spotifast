@@ -327,10 +327,11 @@ fn liked_entry(app: &App) -> Entry {
     }
 }
 
-/// The Local Files row, present only once folders are set in Settings. It
+/// The Local Files row, present only once folders are set in Settings and
+/// while they hold files (a count still unknown keeps it). It
 /// has no Spotify URI, so the play affordances that need one stay off.
 fn local_files_entry(app: &App) -> Option<Entry> {
-    if app.settings.local_folders.is_empty() {
+    if app.settings.local_folders.is_empty() || app.local_files_count == Some(0) {
         return None;
     }
     let count = app
@@ -752,7 +753,9 @@ fn paint_expanded_art(app: &mut App, ui: &mut egui::Ui, rect: Rect) {
 /// collapsed folders remain reachable. Liked Songs belongs to the account.
 fn playlist_rows(app: &App, sort: LibrarySort, needle: &str, entries: &mut Vec<Entry>) {
     let liked = liked_entry(app);
-    if needle.is_empty() || liked.name.to_lowercase().contains(needle) {
+    if app.library.liked.total != Some(0)
+        && (needle.is_empty() || liked.name.to_lowercase().contains(needle))
+    {
         entries.push(liked);
     }
     if let Some(local) = local_files_entry(app)
@@ -1114,6 +1117,10 @@ fn contents(app: &mut App, ui: &mut egui::Ui, grid_art: Option<Rect>) {
     let mut show_search = ui
         .data(|data| data.get_temp::<bool>(show_search_id))
         .unwrap_or(false);
+    let show_filters_id = egui::Id::new("sidebar-show-filters");
+    let mut show_filters = ui
+        .data(|data| data.get_temp::<bool>(show_filters_id))
+        .unwrap_or(false);
 
     let mut focus_search = false;
 
@@ -1182,14 +1189,30 @@ fn contents(app: &mut App, ui: &mut egui::Ui, grid_art: Option<Rect>) {
                     app.library.filter.clear();
                 }
             }
+            let filtering = filter != Filter::Playlists || app.settings.library_by_you;
+            if theme::icon_button(
+                ui,
+                Icon::Funnel,
+                16.0,
+                if show_filters || filtering {
+                    palette.accent
+                } else {
+                    palette.secondary
+                },
+                palette.text,
+                &gettext(locale, "Filter Your Library"),
+            )
+            .clicked()
+            {
+                show_filters = !show_filters;
+            }
             // The buttons come first; the heading takes the space left,
             // a little smaller where a translation runs long, and gives way
             // to them in the narrowest sidebar, where the icon still names
             // the section.
             ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                 let heading = gettext(locale, "Library");
-                let room = ui.available_width() - 6.0;
-                let fits = [15.0, 14.0, 13.0].into_iter().find(|&size| {
+                let room = ui.available_width() - 6.0;                let fits = [15.0, 14.0, 13.0].into_iter().find(|&size| {
                     ui.painter()
                         .layout_no_wrap(heading.to_string(), theme::bold(size), palette.text)
                         .size()
@@ -1202,46 +1225,73 @@ fn contents(app: &mut App, ui: &mut egui::Ui, grid_art: Option<Rect>) {
             });
         });
     });
-    ui.add_space(6.0);
-
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
-        for (value, label) in [
-            (Filter::Playlists, gettext(locale, "Playlists")),
-            (Filter::Albums, gettext(locale, "Albums")),
-            (Filter::Artists, gettext(locale, "Artists")),
-            (Filter::Podcasts, gettext(locale, "Podcasts")),
-        ] {
-            if theme::soft_button(ui, &palette, None, &label, filter == value).clicked() {
-                filter = value;
+    let mut filters = |ui: &mut egui::Ui| {
+        ui.add_space(6.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+            for (value, label) in [
+                (Filter::Playlists, gettext(locale, "Playlists")),
+                (Filter::Albums, gettext(locale, "Albums")),
+                (Filter::Artists, gettext(locale, "Artists")),
+                (Filter::Podcasts, gettext(locale, "Podcasts")),
+            ] {
+                if theme::soft_button(ui, &palette, None, &label, filter == value).clicked() {
+                    filter = value;
+                }
             }
-        }
-    });
+        });
+        let sort = selected_sort(app, filter);
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            sort_menu(app, ui, filter, sort);
+            if filter == Filter::Playlists {
+                // Translators: Library filter for playlists created by the signed-in user.
+                let label = gettext(locale, "By You");
+                let by_you = app.settings.library_by_you;
+                let response = theme::soft_button(ui, &palette, None, &label, by_you);
+                response.widget_info(|| {
+                    egui::WidgetInfo::selected(
+                        egui::WidgetType::Button,
+                        ui.is_enabled(),
+                        by_you,
+                        &*label,
+                    )
+                });
+                if response.clicked() {
+                    app.actions.push(Action::SetLibraryByYou(!by_you));
+                }
+            }
+        });
+    };
+    let reveal = ui
+        .ctx()
+        .animate_bool_with_time(show_filters_id, show_filters, 0.18);
+    if reveal >= 1.0 {
+        filters(ui);
+    } else if reveal > 0.0 {
+        let height_id = egui::Id::new("sidebar-filters-height");
+        let full = ui
+            .data(|data| data.get_temp::<f32>(height_id))
+            .unwrap_or(70.0);
+        let (rect, _) =
+            ui.allocate_exact_size(vec2(ui.available_width(), full * reveal), egui::Sense::hover());
+        let mut inner = ui.new_child(
+            egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(
+                rect.min,
+                vec2(rect.width(), full.max(70.0) * 2.0),
+            )),
+        );
+        inner.set_clip_rect(rect.intersect(ui.clip_rect()));
+        inner.multiply_opacity(reveal);
+        filters(&mut inner);
+        let measured = inner.min_rect().height();
+        ui.data_mut(|data| data.insert_temp(height_id, measured));
+    }
     let sort = selected_sort(app, filter);
-    ui.add_space(4.0);
-    ui.horizontal_wrapped(|ui| {
-        sort_menu(app, ui, filter, sort);
-        if filter == Filter::Playlists {
-            // Translators: Library filter for playlists created by the signed-in user.
-            let label = gettext(locale, "By You");
-            let by_you = app.settings.library_by_you;
-            let response = theme::soft_button(ui, &palette, None, &label, by_you);
-            response.widget_info(|| {
-                egui::WidgetInfo::selected(
-                    egui::WidgetType::Button,
-                    ui.is_enabled(),
-                    by_you,
-                    &*label,
-                )
-            });
-            if response.clicked() {
-                app.actions.push(Action::SetLibraryByYou(!by_you));
-            }
-        }
-    });
     ui.data_mut(|data| {
         data.insert_temp(filter_id, filter);
         data.insert_temp(show_search_id, show_search);
+        data.insert_temp(show_filters_id, show_filters);
     });
     if show_search {
         ui.add_space(4.0);

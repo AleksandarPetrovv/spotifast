@@ -2160,7 +2160,7 @@ mod tests {
                         button.x0
                     );
                 }
-                if width >= 250.0 {
+                if width > 250.0 {
                     assert!(
                         label.is_some(),
                         "{locale:?} at {width}: the heading has room"
@@ -2239,6 +2239,26 @@ mod tests {
                 app.backend.shutdown();
             }
         }
+    }
+
+    fn show_library_filters(ctx: &egui::Context) {
+        ctx.data_mut(|data| data.insert_temp(egui::Id::new("sidebar-show-filters"), true));
+    }
+
+    fn open_library_filters(ctx: &egui::Context, app: &mut App) {
+        accessible_frame(ctx, app, vec![]);
+        let tree = accessible_frame(ctx, app, vec![]);
+        let label = crate::i18n::gettext(app.locale, "Filter Your Library");
+        let funnel = accessible_node(&tree, &label, egui::accesskit::Role::Button);
+        accessible_frame(
+            ctx,
+            app,
+            vec![accessible_action(
+                funnel,
+                egui::accesskit::Action::Click,
+                None,
+            )],
+        );
     }
 
     fn accessible_frame(
@@ -2604,10 +2624,10 @@ mod tests {
         use egui::accesskit::{Action as AccessibleAction, Role};
         let (ctx, mut app) = accessible_app("by-you");
         app.settings.art_expanded = false;
-        accessible_frame(&ctx, &mut app, vec![]);
+        open_library_filters(&ctx, &mut app);
         let tree = accessible_frame(&ctx, &mut app, vec![]);
         accessible_node(&tree, "Discover Weekly", Role::Button);
-        let by_you = accessible_node(&tree, "By You", Role::Button);
+        let by_you =accessible_node(&tree, "By You", Role::Button);
         accessible_frame(
             &ctx,
             &mut app,
@@ -2664,9 +2684,9 @@ mod tests {
         for &locale in Locale::value_variants() {
             let (ctx, mut app) = accessible_app(&format!("translated-sidebar-{locale:?}"));
             app.locale = locale;
-            accessible_frame(&ctx, &mut app, vec![]);
+            open_library_filters(&ctx, &mut app);
             let tree = accessible_frame(&ctx, &mut app, vec![]);
-            let home = accessible_node(&tree, &gettext(locale, "Home"), Role::Button);
+            let home =accessible_node(&tree, &gettext(locale, "Home"), Role::Button);
             let search = accessible_node(&tree, &gettext(locale, "Search"), Role::Button);
             accessible_node(&tree, &gettext(locale, "Create a playlist"), Role::Button);
             accessible_node(&tree, &gettext(locale, "Albums"), Role::Button);
@@ -3180,7 +3200,7 @@ mod tests {
         app.settings.sidebar_order =
             vec!["spotify:playlist:pl4".into(), "spotify:playlist:pl1".into()];
         let saved = app.settings.sidebar_order.clone();
-        accessible_frame(&ctx, &mut app, vec![]);
+        open_library_filters(&ctx, &mut app);
         let tree = accessible_frame(&ctx, &mut app, vec![]);
         let sort = accessible_node(&tree, "Local custom order", Role::Button);
         accessible_frame(
@@ -3363,6 +3383,7 @@ mod tests {
     fn the_podcasts_shelf_leaves_out_audiobooks() {
         let (ctx, mut app) = accessible_app("library-podcasts-audiobooks");
         let view = crate::ui::sidebar::show;
+        show_library_filters(&ctx);
         view_frame(&ctx, &mut app, vec![], view);
         let painted = view_frame(&ctx, &mut app, vec![], view);
         let chip = painted
@@ -3819,6 +3840,7 @@ mod tests {
             app.library.artists.complete = false;
             app.library.artists.after = Some("next".into());
             app.library.shows.next_offset = Some(50);
+            show_library_filters(&ctx);
             view_frame(&ctx, &mut app, vec![], view);
             let painted = view_frame(&ctx, &mut app, vec![], view);
             let position = painted
