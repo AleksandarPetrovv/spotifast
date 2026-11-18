@@ -40,7 +40,9 @@ struct Layer {
     texture: Option<TextureHandle>,
 }
 
-type Finished = Arc<Mutex<Option<(Key, Option<ColorImage>)>>>;
+/// Every finished render, so a slower one for an older key cannot write
+/// over the one still wanted.
+type Finished = Arc<Mutex<Vec<(Key, Option<ColorImage>)>>>;
 
 #[derive(Default)]
 pub struct Backdrop {
@@ -89,13 +91,10 @@ pub fn paint(app: &mut App, ui: &egui::Ui) {
 
 impl Backdrop {
     fn update(&mut self, ctx: &egui::Context, key: Key, art: &ArtLoader, reduced: bool) {
-        let finished = self
-            .finished
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .take();
+        let finished = std::mem::take(&mut *self.finished.lock().unwrap_or_else(|p| p.into_inner()));
         if let Some((done, image)) = finished
-            && self.wanted.as_ref() == Some(&done)
+            .into_iter()
+            .rfind(|(done, _)| self.wanted.as_ref() == Some(done))
         {
             self.install(ctx, done, image, reduced);
         }
@@ -137,7 +136,7 @@ impl Backdrop {
         let (finished, ctx) = (Arc::clone(&self.finished), ctx.clone());
         std::thread::spawn(move || {
             let image = bytes().and_then(|bytes| render(&bytes, &key));
-            *finished.lock().unwrap_or_else(|p| p.into_inner()) = Some((key, image));
+            finished.lock().unwrap_or_else(|p| p.into_inner()).push((key, image));
             ctx.request_repaint();
         });
     }
@@ -324,6 +323,39 @@ mod tests {
         assert!(pixels[8][0] < 0.5 && pixels[6][0] > 0.0);
         let total: f32 = pixels.iter().map(|p| p[0]).sum();
         assert!((total - 1.0).abs() < 0.01, "{total}");
+    }
+
+    /// Pressing Next quickly finishes renders out of order: an older one
+    /// landing last must not take the place of the one still wanted.
+    #[test]
+    fn a_late_render_for_an_old_song_cannot_hide_the_wanted_one() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let art = ArtLoader::new(
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+            runtime.handle().clone(),
+            std::env::temp_dir().join("spotifast-hazy-test-art"),
+        );
+        let ctx = egui::Context::default();
+        let song = |name: &str| Key {
+            source: Some(Source::Art(format!("https://i.scdn.co/image/{name}"))),
+            ..key(7)
+        };
+        let mut backdrop = Backdrop {
+            wanted: Some(song("wanted")),
+            ..Default::default()
+        };
+        let picture = || Some(ColorImage::filled([2, 2], Color32::RED));
+        backdrop
+            .finished
+            .lock()
+            .unwrap()
+            .extend([(song("wanted"), picture()), (song("older"), picture())]);
+        backdrop.update(&ctx, song("wanted"), &art, true);
+        let above = backdrop.above.as_ref().expect("the wanted render is shown");
+        assert!(above.key == song("wanted") && above.texture.is_some());
     }
 
     #[test]
