@@ -102,25 +102,60 @@ jobs:
           if-no-files-found: error
 
   macos:
-    name: macos universal
+    name: macos (${{ matrix.target }})
     runs-on: macos-15
+    strategy: &macos_matrix
+      matrix:
+        target: [aarch64-apple-darwin, x86_64-apple-darwin]
     env: &macos_env
       SOURCE_REF: ${{ inputs.release_tag }}
-    steps: &macos_steps
+    steps: &macos_build
       - uses: actions/checkout@v7
         with:
           ref: ${{ env.SOURCE_REF }}
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-      - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
-      - run: |
-          cargo build --release --no-default-features --target aarch64-apple-darwin
-          cargo build --release --no-default-features --target x86_64-apple-darwin
+      - run: rustup target add ${{ matrix.target }}
+      - run: cargo build --release --no-default-features --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v7
+        with:
+          name: mac-bin-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/spotifast
+          overwrite: true
+          if-no-files-found: error
+
+  # GitHub sometimes has no macOS machine to give ("The job was not
+  # acquired by Runner") and cancels the job after 15 minutes without a
+  # step. Each mac job then runs again on an Intel machine.
+  macos_intel:
+    name: macos (${{ matrix.target }}, intel retry)
+    needs: macos
+    if: ${{ !cancelled() && needs.macos.result == 'cancelled' }}
+    runs-on: macos-15-intel
+    strategy: *macos_matrix
+    env: *macos_env
+    steps: *macos_build
+
+  # Both halves build at once on separate machines, then one app holds both.
+  macos_universal:
+    name: macos universal
+    needs: [macos, macos_intel]
+    if: ${{ !cancelled() && (needs.macos.result == 'success' || needs.macos_intel.result == 'success') }}
+    runs-on: macos-15
+    env: *macos_env
+    steps: &macos_package
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ env.SOURCE_REF }}
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: mac-bin-*
+          path: bin
       - run: |
           mkdir universal
-          lipo -create target/aarch64-apple-darwin/release/spotifast target/x86_64-apple-darwin/release/spotifast -output universal/spotifast
+          lipo -create bin/mac-bin-aarch64-apple-darwin/spotifast bin/mac-bin-x86_64-apple-darwin/spotifast -output universal/spotifast
       - run: |
           mkdir -p dist/macos-input
           version="${{ inputs.release_tag }}"
@@ -139,21 +174,18 @@ jobs:
             dist/*.pkg
           if-no-files-found: error
 
-  # GitHub sometimes has no macOS machine to give ("The job was not
-  # acquired by Runner") and cancels the job after 15 minutes without a
-  # step. The build is universal either way, so an Intel machine retries it.
-  macos_intel:
+  macos_universal_intel:
     name: macos universal (intel retry)
-    needs: macos
-    if: ${{ !cancelled() && needs.macos.result == 'cancelled' }}
+    needs: macos_universal
+    if: ${{ !cancelled() && needs.macos_universal.result == 'cancelled' }}
     runs-on: macos-15-intel
     env: *macos_env
-    steps: *macos_steps
+    steps: *macos_package
 
   publish:
     name: github release
-    needs: [windows, macos, macos_intel]
-    if: ${{ !cancelled() && needs.windows.result == 'success' && (needs.macos.result == 'success' || needs.macos_intel.result == 'success') }}
+    needs: [windows, macos_universal, macos_universal_intel]
+    if: ${{ !cancelled() && needs.windows.result == 'success' && (needs.macos_universal.result == 'success' || needs.macos_universal_intel.result == 'success') }}
     runs-on: ubuntu-latest
     env:
       SOURCE_REF: ${{ inputs.release_tag }}
@@ -164,8 +196,13 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@v7
         with:
+          pattern: windows-*
           path: dist
           merge-multiple: true
+      - uses: actions/download-artifact@v7
+        with:
+          name: macos-universal
+          path: dist
       - run: python3 packaging/release-names.py dist '${{ inputs.release_tag }}'
       - uses: ruby/setup-ruby@v1
         if: ${{ inputs.release_tag != 'v0.12.0' }}
