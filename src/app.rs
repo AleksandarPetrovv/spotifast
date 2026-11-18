@@ -1655,6 +1655,11 @@ impl App {
         ctx.add_image_loader(std::sync::Arc::new(self.backend.art().scaler()));
         // The covers the last window's egui held are gone with it.
         self.backend.art().forget_textures();
+        // So are the backdrops' pictures: their texture ids would name
+        // whatever this window's egui makes under the same number.
+        self.hazy = Default::default();
+        self.lyrics_backdrop = Default::default();
+        self.softened_covers = Default::default();
         ctx.set_theme(self.theme_preference());
         self.applied_dark = None;
         self.forget_skin_textures();
