@@ -585,7 +585,7 @@ impl Default for Settings {
             personal_app_intro_seen: false,
             slow_app_banner: SlowAppBanner::default(),
             playback_authorized: false,
-            keep_playing_in_background: true,
+            keep_playing_in_background: false,
             tray_icon: TrayIcon::Colour,
             mac_notch_widget: false,
             mac_show_in_dock: true,
