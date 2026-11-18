@@ -546,7 +546,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             soloist_enabled: false,
-            mixed_playback: false,
+            mixed_playback: true,
             device_name: "Spotifast".to_string(),
             bitrate: 320,
             normalisation: false,

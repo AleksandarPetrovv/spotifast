@@ -302,7 +302,7 @@ Files on the Built-in Player** lets both players share the work: Spotify songs
 play on Soloist and local files (`spotify:local:` songs) play on the built-in
 player. It needs Soloist turned on and the separate Spotify access approval
 that the built-in player signs in with. Turning the option on requests that
-approval if it is missing. The `mixed_playback` preference defaults to false.
+approval if it is missing. The `mixed_playback` preference defaults to true.
 
 Starting a local song plays it, and the local songs right after it, on the
 built-in player. Soloist then continues the playlist from the next Spotify song.

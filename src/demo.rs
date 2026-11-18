@@ -9499,6 +9499,8 @@ mod tests {
         app.settings.bitrate = 160;
         app.settings.normalisation = false;
         app.settings.audio_cache_mb = 4096;
+        // Mixed playback brings the Local files section back under Soloist.
+        app.settings.mixed_playback = false;
         for enabled in [true, false] {
             app.settings.soloist_enabled = enabled;
             // Soloist has an Audio quality row of its own, so this looks for
@@ -9574,6 +9576,7 @@ mod tests {
     fn routed_soloist_shows_only_supported_audio_controls() {
         let (ctx, mut app) = accessible_app("soloist-processing");
         app.settings.soloist_enabled = true;
+        app.settings.mixed_playback = false;
         app.soloist_audio = true;
         for title in ["Equalizer", "MilkDrop", "Player bar visualizer"] {
             let text = settings_text(&ctx, &mut app, title);
