@@ -43,6 +43,8 @@ jobs:
         if: ${{ inputs.release_tag == 'v0.12.0' || matrix.target == 'x86_64-pc-windows-msvc' }}
         with:
           targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        if: ${{ inputs.release_tag == 'v0.12.0' || matrix.target == 'x86_64-pc-windows-msvc' }}
       - run: rustup target add ${{ matrix.target }}
         if: ${{ inputs.release_tag == 'v0.12.0' || matrix.target == 'x86_64-pc-windows-msvc' }}
       - uses: ilammy/msvc-dev-cmd@v1
@@ -111,6 +113,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
       - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
       - run: |
           cargo build --release --no-default-features --target aarch64-apple-darwin

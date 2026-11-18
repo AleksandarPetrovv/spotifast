@@ -29,6 +29,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
       - uses: ilammy/msvc-dev-cmd@v1
       - run: cargo build --release --no-default-features --target x86_64-pc-windows-msvc
       - name: package the msi
@@ -65,6 +66,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
       - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
       - run: |
           cargo build --release --no-default-features --target aarch64-apple-darwin
