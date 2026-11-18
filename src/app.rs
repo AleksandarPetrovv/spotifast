@@ -6709,17 +6709,7 @@ impl App {
             }
             Page::Search => {}
             Page::LikedSongs => self.ensure_liked_songs(),
-            Page::LocalFiles => {
-                // The index is disk local; scan once when nothing is known
-                // yet. A repeat pass comes from Rescan in Settings.
-                if self.local_index.is_none()
-                    && !self.local_files_scanning
-                    && !self.settings.local_folders.is_empty()
-                {
-                    self.local_files_scanning = true;
-                    self.backend.send(crate::backend::Command::LocalFilesScan);
-                }
-            }
+            Page::LocalFiles => self.ensure_local_index(),
             Page::Albums => {
                 if self.network_reachable && !self.library.albums.loaded_once {
                     self.load_more(Page::Albums);
@@ -8596,6 +8586,11 @@ impl App {
                         self.request_account_caches();
                     }
                     self.user = Some(user);
+                    // The sidebar hides an empty Liked Songs or Local Files
+                    // and local rows grey out without their file, so both
+                    // counts are read now rather than when their page opens.
+                    self.ensure_liked_songs();
+                    self.ensure_local_index();
                     let page = self.page().clone();
                     self.ensure_loaded(page);
                     if let Some(now) = self.now_playing() {
@@ -16950,6 +16945,18 @@ impl App {
 }
 
 impl App {
+    /// The index is disk local; scan once when nothing is known yet. A
+    /// repeat pass comes from Rescan in Settings.
+    fn ensure_local_index(&mut self) {
+        if self.local_index.is_none()
+            && !self.local_files_scanning
+            && !self.settings.local_folders.is_empty()
+        {
+            self.local_files_scanning = true;
+            self.backend.send(crate::backend::Command::LocalFilesScan);
+        }
+    }
+
     fn ensure_liked_songs(&mut self) {
         if self.liked_songs.cache_loading || self.liked_songs.refreshing() {
             return;
@@ -20926,6 +20933,22 @@ mod tests {
         });
         app.receive_account_caches("alice", 7, None, Some(cached_home()));
         assert!(app.home.podcasts.is_empty());
+    }
+
+    /// The sidebar can hide an empty Liked Songs or Local Files without
+    /// either page having been opened.
+    #[test]
+    fn signing_in_reads_the_liked_and_local_counts() {
+        let mut app = headless_app();
+        app.settings.local_folders = vec!["C:\\Music".into()];
+        assert!(!app.liked_songs.cache_loading && !app.local_files_scanning);
+        app.handle_api(ApiResponse::Me(Ok(User {
+            id: "listener".into(),
+            ..Default::default()
+        })));
+        assert!(app.liked_songs.cache_loading, "the saved Liked Songs are read");
+        assert!(app.local_files_scanning, "the local files are counted");
+        app.backend.shutdown();
     }
 
     /// A session connecting reads its account's cache once `Me` names the
