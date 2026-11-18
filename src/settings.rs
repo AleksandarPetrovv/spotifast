@@ -566,7 +566,7 @@ impl Default for Settings {
             home: HomeSettings::default(),
             accent_from_art: true,
             player_bar_vis: PlayerBarVis::Off,
-            player_bar_vis_click: true,
+            player_bar_vis_click: false,
             visualizer_fps: crate::milkdrop::DEFAULT_FPS,
             volume: (u16::MAX as u32 * 70 / 100) as u16,
             sidebar_visible: true,
@@ -1593,14 +1593,14 @@ mod tests {
         use super::PlayerBarVis;
         let settings: Settings = serde_json::from_str("{}").unwrap();
         assert_eq!(settings.player_bar_vis, PlayerBarVis::Off);
-        assert!(settings.player_bar_vis_click);
-        let disabled = Settings {
-            player_bar_vis_click: false,
+        assert!(!settings.player_bar_vis_click);
+        let enabled = Settings {
+            player_bar_vis_click: true,
             ..Settings::default()
         };
-        let json = serde_json::to_string(&disabled).unwrap();
+        let json = serde_json::to_string(&enabled).unwrap();
         let restored: Settings = serde_json::from_str(&json).unwrap();
-        assert!(!restored.player_bar_vis_click);
+        assert!(restored.player_bar_vis_click);
         for mode in [PlayerBarVis::Spectrum, PlayerBarVis::Waveform] {
             let settings = Settings {
                 player_bar_vis: mode,
