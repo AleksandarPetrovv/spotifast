@@ -1587,11 +1587,13 @@ pub(crate) fn row_playable(item: &PlayableItem) -> bool {
 
 /// Whether a local-file row can start playback on the current target: only
 /// this computer's player reaches the files, and only once local folders
-/// are set up. An undecided target (the engine is connecting) counts as
-/// this computer, matching how such a request waits for the engine.
+/// are set up, and only songs those folders hold. An undecided target (the
+/// engine is connecting) counts as this computer, matching how such a
+/// request waits for the engine.
 pub(crate) fn local_playable_here(app: &App, item: &PlayableItem) -> bool {
     item.uri().starts_with("spotify:local:")
         && app.plays_local_files()
+        && !app.local_missing(item.uri())
 }
 
 /// Whether a row can start playback where playback would go now.

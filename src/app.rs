@@ -4188,13 +4188,16 @@ impl App {
         if let Some(error) = &state.error
             && self.local.error.as_deref() != Some(error.as_str())
         {
+            let unavailable_uri = error.strip_prefix("This item isn't available: ");
+            let local_unavailable =
+                unavailable_uri.is_some_and(|uri| uri.starts_with(LOCAL_URI_PREFIX));
             if error == crate::player::AUDIO_KEY_REFUSED && !self.audio_key_banner_closed {
                 // The banner explains it and says what still works.
                 self.audio_key_banner = true;
-            } else {
+            } else if !local_unavailable {
+                // A missing local song is a greyed-out row, not news.
                 self.toast_error(engine_error_text(self.locale, error));
             }
-            let unavailable_uri = error.strip_prefix("This item isn't available: ");
             if let Some(uri) = unavailable_uri.filter(|uri| uri.starts_with("spotify:local:")) {
                 // A queued local file that fails to load never becomes the
                 // playing track, so nothing else would take its row back.
@@ -11077,8 +11080,11 @@ impl App {
                 let item = row.playable()?;
                 let local =
                     row.is_local || matches!(item, PlayableItem::Track(track) if track.is_local);
-                let unplayable = !local
-                    && matches!(item, PlayableItem::Track(track) if track.is_playable == Some(false));
+                let unplayable = if local {
+                    self.local_missing(item.uri())
+                } else {
+                    matches!(item, PlayableItem::Track(track) if track.is_playable == Some(false))
+                };
                 (!item.uri().is_empty() && !unplayable).then(|| item.uri().to_string())
             })
             .collect()
@@ -13826,6 +13832,14 @@ impl App {
             .iter()
             .find(|file| file.uri == uri)
             .map(|file| file.path.as_path())
+    }
+
+    /// A local song the scanned folders do not hold. Nothing counts as
+    /// missing before the index has loaded.
+    pub fn local_missing(&self, uri: &str) -> bool {
+        uri.starts_with(LOCAL_URI_PREFIX)
+            && self.local_index.is_some()
+            && self.local_file(uri).is_none()
     }
 
     /// The cover embedded in the local file `uri` plays from, unless it
@@ -35761,6 +35775,10 @@ mod tests {
                 let mut app = headless_app();
                 app.attach(&ctx);
                 crate::demo::populate(&mut app);
+                app.local_index = Some(local_index(&[(
+                    "spotify:local:Artist:Album:Song:180",
+                    "/music/Song.mp3",
+                )]));
                 app.remote = None;
                 app.selected_device = None;
                 app.local.connected = false;
@@ -36595,6 +36613,33 @@ mod tests {
             !queue_uris(&app).1.contains(&local_uri.to_string()),
             "the displayed queue drops the file that cannot load"
         );
+        assert!(
+            app.toasts.iter().all(|toast| toast.kind != ToastKind::Error),
+            "a missing local song is only greyed out"
+        );
+    }
+
+    #[test]
+    fn a_local_song_the_folders_lack_is_greyed_and_left_out() {
+        let found = "spotify:local:Artist:Album:Found:180";
+        let missing = "spotify:local:Artist:Album:Gone:180";
+        let mut app = headless_app();
+        assert!(!app.local_missing(missing), "unknown until the index loads");
+        app.local_index = Some(local_index(&[(found, "/music/Found.mp3")]));
+        assert!(app.local_missing(missing));
+        assert!(!app.local_missing(found));
+        assert!(!app.local_missing("spotify:track:a"));
+        let row = |uri: &str| PlaylistItem {
+            is_local: uri.starts_with("spotify:local:"),
+            item: Some(PlayableItem::Track(Track {
+                uri: uri.into(),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+        let list = &mut app.playlist_pages.entry("pl".into()).or_default().items;
+        list.items = vec![row("spotify:track:a"), row(missing), row(found)];
+        assert_eq!(app.playlist_order("pl"), ["spotify:track:a", found]);
     }
 
     #[test]
