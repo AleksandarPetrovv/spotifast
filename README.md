@@ -1,8 +1,10 @@
 spotifast (forked) with additions (credits to Carmine Paolino)
 
+- plays songs thru soloist and falls back to librespot for local songs, did this just so i can have my spotify wrapped lol (i dont think librespot plays count towards wrapped, soloist plays do)
 - can download songs as different audio formats (individually, songs, albums etc)
 - can add songs from third party sources like youtube or soundcloud into your playlist
 - can add songs from your pc into your playlist
+- ported hazy theme from spicetify as the default
 - has romanization for japanese, chinese and korean songs
 - caches the playlists because initial connection with spotify is very slow
 - adds musixmatch, lrclib, netease and genius as extra fallback lyrics providers
