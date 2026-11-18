@@ -404,6 +404,117 @@ impl<P: ProtectedStore, C: ProtectedStore> ProtectedStore for WithSealedCopy<P, 
     }
 }
 
+/// macOS asks for the keychain password once per entry, and forgets the
+/// approval whenever the app's signature changes. Every grant lives in one
+/// entry, read once and kept in memory, so an update costs one prompt instead
+/// of one per grant and access. Older versions' separate entries move in the
+/// first time they are read.
+#[cfg(any(target_os = "macos", test))]
+struct OneEntry<P> {
+    native: P,
+    grants: Option<std::collections::BTreeMap<String, String>>,
+    checked: std::collections::HashSet<String>,
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl<P: ProtectedStore> OneEntry<P> {
+    const KEY: &'static str = "grants";
+
+    fn new(native: P) -> Self {
+        Self {
+            native,
+            grants: None,
+            checked: Default::default(),
+        }
+    }
+
+    fn grants(&mut self) -> Result<&mut std::collections::BTreeMap<String, String>, Error> {
+        if self.grants.is_none() {
+            let grants = match self.native.read(Self::KEY)? {
+                Some(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|_| {
+                    log::warn!("the keychain's grant entry is unreadable; starting it over");
+                    Default::default()
+                }),
+                None => Default::default(),
+            };
+            self.grants = Some(grants);
+        }
+        Ok(self.grants.get_or_insert_default())
+    }
+
+    fn save(&mut self) -> Result<(), Error> {
+        let bytes = serde_json::to_vec(&self.grants()?).map_err(|_| Error::Invalid)?;
+        self.native.write(Self::KEY, &bytes)
+    }
+
+    /// Writes `value` (None removes it), and puts the old one back if the
+    /// keychain refuses, so memory never claims what the keychain lacks.
+    fn set(&mut self, key: &str, value: Option<String>) -> Result<(), Error> {
+        let grants = self.grants()?;
+        let old = match value {
+            Some(value) => grants.insert(key.to_owned(), value),
+            None => grants.remove(key),
+        };
+        let saved = self.save();
+        if saved.is_err() {
+            let grants = self.grants()?;
+            match old {
+                Some(old) => grants.insert(key.to_owned(), old),
+                None => grants.remove(key),
+            };
+        }
+        saved
+    }
+}
+
+#[cfg(any(target_os = "macos", test))]
+impl<P: ProtectedStore> ProtectedStore for OneEntry<P> {
+    fn read(&mut self, key: &str) -> Result<Option<Vec<u8>>, Error> {
+        use base64::Engine;
+        let base64 = base64::engine::general_purpose::STANDARD;
+        if let Some(value) = self.grants()?.get(key) {
+            return base64.decode(value).map(Some).map_err(|_| Error::Invalid);
+        }
+        if self.checked.contains(key) {
+            return Ok(None);
+        }
+        let legacy = self.native.read(key)?;
+        self.checked.insert(key.to_owned());
+        let Some(secret) = legacy else {
+            return Ok(None);
+        };
+        match self.set(key, Some(base64.encode(&secret))) {
+            Ok(()) => {
+                let _ = self.native.delete(key);
+            }
+            Err(error) => log::warn!("could not move a grant into the keychain's one entry: {error:?}"),
+        }
+        Ok(Some(secret))
+    }
+
+    fn write(&mut self, key: &str, secret: &[u8]) -> Result<(), Error> {
+        use base64::Engine;
+        let value = base64::engine::general_purpose::STANDARD.encode(secret);
+        self.set(key, Some(value))?;
+        self.checked.insert(key.to_owned());
+        Ok(())
+    }
+
+    fn delete(&mut self, key: &str) -> Result<(), Error> {
+        let one = if self.grants()?.contains_key(key) {
+            self.set(key, None)
+        } else {
+            Ok(())
+        };
+        // An older version's separate entry must not come back after this.
+        let legacy = self.native.delete(key);
+        if legacy.is_ok() {
+            self.checked.insert(key.to_owned());
+        }
+        one.and(legacy)
+    }
+}
+
 /// Encrypts a secret so only the current user can decrypt it. `context` is
 /// bound to the result: a sealed grant opens only under its own key.
 #[cfg(any(windows, test))]
@@ -624,7 +735,9 @@ impl Store {
                 sealer: Dpapi,
             },
         });
-        #[cfg(not(windows))]
+        #[cfg(target_os = "macos")]
+        let backend = Box::new(OneEntry::new(NativeStore::default()));
+        #[cfg(not(any(windows, target_os = "macos")))]
         let backend = Box::new(NativeStore::default());
         Self::with_backend(dirs, backend)
     }
@@ -1654,6 +1767,34 @@ mod tests {
     }
     fn with_sealed_copy(f: &Fixture) -> Store {
         Store::with_backend(f.dirs.clone(), sealed_backend(f))
+    }
+
+    #[test]
+    fn one_keychain_entry_holds_every_grant() {
+        let f = Fixture::new();
+        let old = f.store.lease(Slot::Shared).key();
+        let new = f.store.lease(Slot::Playback).key();
+        f.fake
+            .lock()
+            .unwrap()
+            .values
+            .insert(old.clone(), b"saved by 0.17".to_vec());
+        let mut one = OneEntry::new(Backend(f.fake.clone()));
+        assert_eq!(one.read(&old), Ok(Some(b"saved by 0.17".to_vec())));
+        one.write(&new, b"fresh").unwrap();
+        let keys: Vec<String> = f.fake.lock().unwrap().values.keys().cloned().collect();
+        assert_eq!(keys, ["grants"]);
+
+        f.fake.lock().unwrap().write_error = Some(Error::Locked);
+        assert_eq!(one.write(&new, b"refused"), Err(Error::Locked));
+        assert_eq!(one.read(&new), Ok(Some(b"fresh".to_vec())));
+        f.fake.lock().unwrap().write_error = None;
+
+        let mut restarted = OneEntry::new(Backend(f.fake.clone()));
+        assert_eq!(restarted.read(&old), Ok(Some(b"saved by 0.17".to_vec())));
+        assert_eq!(restarted.read(&new), Ok(Some(b"fresh".to_vec())));
+        restarted.delete(&old).unwrap();
+        assert_eq!(OneEntry::new(Backend(f.fake.clone())).read(&old), Ok(None));
     }
 
     #[test]
