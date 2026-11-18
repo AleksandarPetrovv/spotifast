@@ -15,6 +15,7 @@ on:
           - v0.14.2
           - v0.17.0
           - v0.17.2
+          - v0.17.3
 
 permissions:
   contents: write
@@ -233,7 +234,7 @@ jobs:
           files: dist/*
           preserve_order: true
       - name: publish a new release
-        if: ${{ inputs.release_tag == 'v0.14.2' || inputs.release_tag == 'v0.17.0' || inputs.release_tag == 'v0.17.2' }}
+        if: ${{ inputs.release_tag == 'v0.14.2' || inputs.release_tag == 'v0.17.0' || inputs.release_tag == 'v0.17.2' || inputs.release_tag == 'v0.17.3' }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.release_tag }}
