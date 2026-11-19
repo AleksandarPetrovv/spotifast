@@ -2565,6 +2565,33 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         });
     }
 
+    let settings_title = gettext(locale, "Settings");
+    let reset_rows = [RowText::new(
+        gettext(locale, "Reset settings to default"),
+        gettext(
+            locale,
+            "Puts every preference back to how Spotifast starts. Your sign-in, player, folders and pins stay.",
+        ),
+    )];
+    if section_matches(&needle, &settings_title, &reset_rows) {
+        any_visible = true;
+        section(ui, &palette, &settings_title, |ui| {
+            filtered_row(ui, &palette, &needle, &settings_title, &reset_rows[0], |ui| {
+                if theme::soft_button(
+                    ui,
+                    &palette,
+                    Some(Icon::Refresh),
+                    &gettext(locale, "Reset"),
+                    false,
+                )
+                .clicked()
+                {
+                    app.actions.push(Action::ResetSettings);
+                }
+            });
+        });
+    }
+
     let about = gettext(locale, "About");
     let built_with = gettext(
         locale,

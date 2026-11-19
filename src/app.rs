@@ -15793,6 +15793,41 @@ impl App {
                     }
                 }
             }
+            Action::ResetSettings => {
+                let old = std::mem::take(&mut self.settings);
+                let fresh = old.reset_preferences();
+                let engine = |s: &crate::settings::Settings| {
+                    (s.bitrate, s.normalisation, s.autoplay, s.gapless)
+                        == (fresh.bitrate, fresh.normalisation, fresh.autoplay, fresh.gapless)
+                        && (s.audio_buffer_ms, s.audio_cache, s.audio_cache_mb)
+                            == (fresh.audio_buffer_ms, fresh.audio_cache, fresh.audio_cache_mb)
+                };
+                let engine_kept = engine(&old);
+                // Turning mixed playback on asks for the built-in player's
+                // approval, as its switch does.
+                let mixed_on = fresh.mixed_playback
+                    && !old.mixed_playback
+                    && fresh.soloist_enabled
+                    && !self.local_ready;
+                // The title bar's own action replaces the window when it changes.
+                let custom_titlebar = fresh.custom_titlebar;
+                self.settings = crate::settings::Settings {
+                    custom_titlebar: old.custom_titlebar,
+                    ..fresh
+                };
+                self.locale = self.settings.language.resolve();
+                self.mark_settings_dirty();
+                ctx.set_theme(self.theme_preference());
+                self.apply_theme(ctx);
+                self.apply(Action::SetCustomTitlebar(custom_titlebar), ctx);
+                if !engine_kept {
+                    self.apply(Action::RestartEngine, ctx);
+                }
+                if mixed_on {
+                    self.apply(Action::EnablePlayback, ctx);
+                }
+                self.toast(gettext(self.locale, "Settings reset to their defaults"));
+            }
             Action::SetWinampTaskbar(visible) => {
                 if self.settings.winamp_show_taskbar != visible {
                     self.settings.winamp_show_taskbar = visible;
@@ -18977,6 +19012,24 @@ mod tests {
             toasts + 1,
             "already local, nothing to explain"
         );
+    }
+
+    /// Reset puts the preferences back and keeps the listener's own. The
+    /// title bar stays at its default here: changing it would flip the
+    /// process-wide switch `choosing_the_custom_title_bar…` checks.
+    #[test]
+    fn resetting_settings_applies_the_defaults() {
+        let mut app = headless_app();
+        let ctx = egui::Context::default();
+        app.settings.theme = crate::settings::ThemeChoice::Dark;
+        app.settings.keep_playing_in_background = true;
+        app.settings.local_folders = vec!["C:\\Music".into()];
+        app.apply(Action::ResetSettings, &ctx);
+        assert_eq!(app.settings.theme, crate::settings::ThemeChoice::Hazy);
+        assert!(!app.settings.keep_playing_in_background);
+        assert!(app.settings.custom_titlebar && !app.switch_intent);
+        assert_eq!(app.settings.local_folders, ["C:\\Music"]);
+        app.backend.shutdown();
     }
 
     /// The title bar choice is saved and, because decorations are fixed when

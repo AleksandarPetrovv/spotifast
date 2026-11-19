@@ -646,6 +646,58 @@ fn default_buffer_ms() -> u32 {
 }
 
 impl Settings {
+    /// Every preference back to its default. What is the listener's own
+    /// stays: sign-in and approvals, the chosen player, folders, pins, saved
+    /// presets, the proxy, the output device, and where windows and panels
+    /// were left.
+    pub fn reset_preferences(&self) -> Self {
+        let kept = self.clone();
+        Self {
+            soloist_enabled: kept.soloist_enabled,
+            device_name: kept.device_name,
+            audio_device: kept.audio_device,
+            system_theme_cache: kept.system_theme_cache,
+            volume: kept.volume,
+            sidebar_visible: kept.sidebar_visible,
+            art_expanded: kept.art_expanded,
+            sidebar_width: kept.sidebar_width,
+            lyrics_width: kept.lyrics_width,
+            queue_width: kept.queue_width,
+            search_history: kept.search_history,
+            web_client_id: kept.web_client_id,
+            personal_app_nudge_at: kept.personal_app_nudge_at,
+            personal_app_intro_seen: kept.personal_app_intro_seen,
+            slow_app_banner: kept.slow_app_banner,
+            playback_authorized: kept.playback_authorized,
+            newest_run: kept.newest_run,
+            pinned_contexts: kept.pinned_contexts,
+            liked_songs_pinned: kept.liked_songs_pinned,
+            sidebar_order: kept.sidebar_order,
+            library_sort: kept.library_sort,
+            local_folders: kept.local_folders,
+            zoom: kept.zoom,
+            winamp_window: kept.winamp_window,
+            playlist_open: kept.playlist_open,
+            playlist_height: kept.playlist_height,
+            eq_open: kept.eq_open,
+            eq_user_presets: kept.eq_user_presets,
+            playlist_shaded: kept.playlist_shaded,
+            eq_shaded: kept.eq_shaded,
+            winamp_shaded: kept.winamp_shaded,
+            milkdrop_open: kept.milkdrop_open,
+            milkdrop_panel_height: kept.milkdrop_panel_height,
+            milkdrop_size: kept.milkdrop_size,
+            proxy_mode: kept.proxy_mode,
+            proxy: kept.proxy,
+            proxy_host: kept.proxy_host,
+            proxy_port: kept.proxy_port,
+            proxy_username: kept.proxy_username,
+            proxy_password: kept.proxy_password,
+            proxy_password_legacy: kept.proxy_password_legacy,
+            ..Self::default()
+        }
+    }
+
     /// Adds `path` to the local file folders when it is not there, or removes
     /// it when it is. The settings UI's quick picks (Music Library, Downloads)
     /// are switches over this one list. Comparison goes through `Path`, so a
@@ -1567,6 +1619,33 @@ mod tests {
 
     /// Older files keep today's colour icon, and the choice round-trips as
     /// a lowercase word (#128).
+    #[test]
+    fn resetting_restores_preferences_and_keeps_the_listeners_own() {
+        let changed = Settings {
+            theme: super::ThemeChoice::Dark,
+            mixed_playback: false,
+            keep_playing_in_background: true,
+            custom_titlebar: false,
+            bitrate: 96,
+            soloist_enabled: true,
+            web_client_id: Some("client".into()),
+            playback_authorized: true,
+            local_folders: vec!["C:\\Music".into()],
+            pinned_contexts: vec!["spotify:playlist:a".into()],
+            ..Settings::default()
+        };
+        let reset = changed.reset_preferences();
+        let defaults = Settings::default();
+        assert_eq!(reset.theme, super::ThemeChoice::Hazy);
+        assert!(reset.mixed_playback && reset.custom_titlebar);
+        assert!(!reset.keep_playing_in_background);
+        assert_eq!(reset.bitrate, defaults.bitrate);
+        assert!(reset.soloist_enabled && reset.playback_authorized);
+        assert_eq!(reset.web_client_id.as_deref(), Some("client"));
+        assert_eq!(reset.local_folders, changed.local_folders);
+        assert_eq!(reset.pinned_contexts, changed.pinned_contexts);
+    }
+
     #[test]
     fn the_tray_icon_stays_in_colour_unless_chosen_and_round_trips() {
         use super::TrayIcon;
