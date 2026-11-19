@@ -3658,8 +3658,14 @@ impl App {
                 self.replay_queued_play();
             } else if std::mem::take(&mut self.soloist_select) {
                 let play = resume || self.now_playing().is_some_and(|now| now.playing);
+                if play && self.mixed.is_none() {
+                    self.pause_other(&Target::Remote(Some(id.clone())));
+                }
                 self.transfer_remote(id, play);
             } else if resume {
+                if self.mixed.is_none() {
+                    self.pause_other(&Target::Remote(Some(id.clone())));
+                }
                 self.transfer_remote(id, true);
             } else if !self.local.is_active()
                 && self.selected_device.is_none()
@@ -4168,6 +4174,16 @@ impl App {
             self.optimistic_playing = None;
             if matches!(state.playback, Playback::Playing | Playback::Loading) {
                 self.clear_play_pending();
+            }
+            // In mixed playback the built-in player only plays interludes;
+            // one sounding outside them is left over and plays under Soloist.
+            if state.playback == Playback::Playing
+                && self.mixed_playback()
+                && self.mixed.is_none()
+                && self.mixed_pending.is_none()
+                && self.targets_own_soloist()
+            {
+                self.pause_local();
             }
         }
         if state.track != self.local.track {
@@ -10255,6 +10271,10 @@ impl App {
                             }
                         }
                     }
+                    // A pause for a player already paused, as `pause_soloist`
+                    // sends to be sure: nothing went wrong.
+                    Err(error)
+                        if action == RemoteAction::Pause && error.status() == Some(403) => {}
                     Err(error) => {
                         self.optimistic_playing = None;
                         self.play_wanted = None;
@@ -11014,7 +11034,8 @@ impl App {
                     let local = matches!(item, PlayableItem::Track(track) if track.is_local)
                         || row.is_local;
                     if local {
-                        return allow_local.then(|| item.uri().to_string());
+                        return (allow_local && !self.local_missing(item.uri()))
+                            .then(|| item.uri().to_string());
                     }
                     if matches!(item, PlayableItem::Track(track)
                             if track.is_playable == Some(false))
@@ -11198,6 +11219,7 @@ impl App {
     /// Plays the interlude's local files on the built-in player, as a plain
     /// list that ends instead of repeating or carrying on.
     fn start_interlude(&mut self, interlude: crate::twerkz::mixed::Interlude) {
+        self.pause_soloist();
         self.local_list = None;
         self.follow_mixed_history();
         self.mixed_history.enter(&interlude.locals);
@@ -11369,25 +11391,36 @@ impl App {
         self.poll_remote_soon();
     }
 
+    /// Silences the built-in player whatever state it is believed to be in:
+    /// a song still loading, or a state that has not arrived yet, would
+    /// otherwise play on beside Soloist.
     fn pause_local(&mut self) {
-        if self.local.playback == Playback::Playing {
-            self.backend.player(PlayerCommand::Toggle);
-        }
+        self.backend.player(PlayerCommand::Pause);
     }
 
+    /// Silences Soloist whatever state Spotify last reported: a stale or
+    /// missing report would otherwise leave it playing beside a local file.
+    /// A pause it did not need is answered with an error nobody sees.
     fn pause_soloist(&mut self) {
         let Some(id) = self.soloist_device_id.clone() else {
             return;
         };
-        let playing = self.remote_fresh().is_some_and(|remote| {
-            remote.state.is_playing
-                && remote.state.device.as_ref().and_then(|d| d.id.as_deref()) == Some(id.as_str())
-        });
-        if playing {
-            if let Some(remote) = self.remote.as_mut() {
-                remote.state.is_playing = false;
-            }
-            self.remote(RemoteAction::Pause, Some(id));
+        if let Some(remote) = self.remote.as_mut()
+            && remote.state.device.as_ref().and_then(|d| d.id.as_deref()) == Some(id.as_str())
+        {
+            remote.state.is_playing = false;
+        }
+        self.remote(RemoteAction::Pause, Some(id));
+    }
+
+    /// In mixed playback, the player that is not about to be heard.
+    fn pause_other(&mut self, heard: &Target) {
+        if !self.mixed_playback() {
+            return;
+        }
+        match heard {
+            Target::Local => self.pause_soloist(),
+            Target::Remote(_) => self.pause_local(),
         }
     }
 
@@ -11553,7 +11586,9 @@ impl App {
         else {
             return false;
         };
-        let Some(locals) = self.mixed_next.take() else {
+        // Unarmed (rows not loaded yet, or a hop in progress): work out now
+        // what comes next, so Next never skips past local songs.
+        let Some(locals) = self.mixed_next.take().or_else(|| self.mixed_upcoming()) else {
             return false;
         };
         self.backend.send(Command::SoloistPauseOnTrack(false));
@@ -11602,6 +11637,15 @@ impl App {
     /// the next ones are worked out and armed.
     fn on_soloist_track(&mut self, uri: String, paused: bool) {
         use crate::twerkz::mixed::{After, Interlude};
+        // Soloist started a song while local files play: they keep the floor.
+        if !paused && self.mixed.is_some() {
+            self.pause_soloist();
+            if let Some(interlude) = &mut self.mixed
+                && interlude.after == After::NextSoloist
+            {
+                interlude.after = After::ResumeSoloist { uri: uri.clone() };
+            }
+        }
         if paused && self.soloist_hop_landed(&uri) {
             return;
         }
@@ -12277,8 +12321,13 @@ impl App {
         }
         self.mixed_disarm();
         let mixed_start = self.mixed_start(&request);
-        if mixed_start.is_none() && self.mixed.is_some() {
-            self.end_interlude();
+        if mixed_start.is_none() {
+            if self.mixed.is_some() {
+                self.end_interlude();
+            } else if self.targets_own_soloist() {
+                // A local file left sounding must not play under the song.
+                self.pause_other(&Target::Remote(None));
+            }
         }
         let mut keys: Vec<String> = Vec::new();
         if let Some(context) = &request.context_uri {
@@ -12775,6 +12824,9 @@ impl App {
         if self.mixed_pending.is_some() {
             let playing = self.believed_playing();
             self.backend.player(PlayerCommand::Toggle);
+            if playing {
+                self.pause_soloist();
+            }
             self.want_playing(!playing);
             return;
         }
@@ -12851,6 +12903,11 @@ impl App {
                     self.remote(RemoteAction::Play, device_id);
                 }
             }
+        }
+        // Pause stops both players: one left sounding has no other control.
+        if playing == Some(true) {
+            let heard = self.target();
+            self.pause_other(&heard);
         }
         if let Some(playing) = playing {
             self.want_playing(!playing);
@@ -36472,6 +36529,8 @@ mod tests {
     #[test]
     fn playlist_play_skips_missing_local_and_unavailable_prefix_rows() {
         let mut app = headless_app();
+        // Scanned folders that lack the file: it is missing, not unknown.
+        app.local_index = Some(local_index(&[]));
         let mut local = cached_playlist_row("spotify:local:artist:album:track");
         local.is_local = true;
         let mut unavailable = cached_playlist_row("spotify:track:unavailable");

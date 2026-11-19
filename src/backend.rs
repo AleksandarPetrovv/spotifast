@@ -2490,6 +2490,15 @@ impl Worker {
                         self.resume = None;
                     }
                     match &self.engine {
+                        Some(engine) if command == PlayerCommand::Pause && engine.carrying() => {
+                            engine.keep_player().pause();
+                        }
+                        // Nothing to pause is not an error.
+                        None if command == PlayerCommand::Pause => {
+                            if let Some(kept) = &self.kept_player {
+                                kept.pause();
+                            }
+                        }
                         // Until the new session picks the song up, it has
                         // nothing to pause: the player does it (#268).
                         Some(engine)

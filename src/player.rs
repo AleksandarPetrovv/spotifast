@@ -293,6 +293,9 @@ impl LoadSpec {
 #[derive(Clone, Debug, PartialEq)]
 pub enum PlayerCommand {
     Toggle,
+    /// Pause whatever is playing or loading, and nothing else: unlike
+    /// `Toggle`, a state the app reads wrongly can never start playback.
+    Pause,
     Next,
     Previous,
     /// Remove manually queued tracks and keep context tracks.
@@ -457,6 +460,21 @@ impl KeptPlayer {
         self.player.stop();
     }
 
+    /// Pauses the song if it plays, while there is no session to ask.
+    pub fn pause(&self) {
+        let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
+        if state.playback == Playback::Playing {
+            state.position_ms = state.position_now();
+            state.position_at = None;
+            state.playback = Playback::Paused;
+            if self.direct.active() {
+                self.direct.player.pause();
+            } else {
+                self.player.pause();
+            }
+        }
+    }
+
     /// Pauses the song or plays it again, while there is no session to ask.
     /// False when it has no song left to pause or play.
     pub fn toggle(&self) -> bool {
@@ -603,6 +621,11 @@ impl Direct {
                 Playback::Paused => self.player.play(),
                 Playback::Stopped => {}
             },
+            PlayerCommand::Pause => {
+                if matches!(playback, Playback::Playing | Playback::Loading) {
+                    self.player.pause();
+                }
+            }
             PlayerCommand::Seek(position_ms) => self.player.seek(*position_ms),
             PlayerCommand::Next => self.next()?,
             PlayerCommand::Previous => self.previous()?,
@@ -1079,6 +1102,11 @@ impl Engine {
                 self.direct.play(uris)?;
             }
             PlayerCommand::Toggle => spirc.play_pause()?,
+            PlayerCommand::Pause => {
+                if playback != Playback::Stopped {
+                    spirc.pause()?;
+                }
+            }
             PlayerCommand::Next => spirc.next()?,
             PlayerCommand::Previous => spirc.prev()?,
             PlayerCommand::ClearQueue => spirc.clear_queue()?,
