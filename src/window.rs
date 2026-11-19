@@ -197,11 +197,28 @@ pub fn usable_size(size: Option<[f32; 2]>) -> Option<[f32; 2]> {
 /// `builder` with its size raised to the main window's minimum. eframe
 /// restores its own saved window over the session's size, and a window saved
 /// while minimized or hidden is saved at about zero.
-pub fn at_least_min_size(builder: egui::ViewportBuilder) -> egui::ViewportBuilder {
+///
+/// On Windows a maximized window also starts restored and maximizes once it
+/// is shown: winit shows the still hidden window for a moment while it
+/// maximizes it, a flash before the window opens for real.
+pub fn main_window_builder(mut builder: egui::ViewportBuilder) -> egui::ViewportBuilder {
+    if cfg!(windows) && builder.maximized == Some(true) {
+        builder.maximized = None;
+        MAXIMIZE_WHEN_SHOWN.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     match builder.inner_size {
         Some(size) => builder.with_inner_size(size.max(MAIN_MIN_SIZE.into())),
         None => builder,
     }
+}
+
+static MAXIMIZE_WHEN_SHOWN: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Whether the window `main_window_builder` started restored should now
+/// maximize. Answers yes once per window.
+pub fn take_maximize_when_shown() -> bool {
+    MAXIMIZE_WHEN_SHOWN.swap(false, std::sync::atomic::Ordering::Relaxed)
 }
 
 static FIXED_SIZE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -391,11 +408,19 @@ mod tests {
     #[test]
     fn a_built_window_is_raised_to_the_minimum_size() {
         let built = |size: [f32; 2]| {
-            at_least_min_size(egui::ViewportBuilder::default().with_inner_size(size)).inner_size
+            main_window_builder(egui::ViewportBuilder::default().with_inner_size(size)).inner_size
         };
         assert_eq!(built([10.0, 10.0]), Some(MAIN_MIN_SIZE.into()));
         assert_eq!(built([64.0, 900.0]), Some(egui::vec2(MAIN_MIN_SIZE[0], 900.0)));
         assert_eq!(built([1240.0, 800.0]), Some(egui::vec2(1240.0, 800.0)));
-        assert_eq!(at_least_min_size(egui::ViewportBuilder::default()).inner_size, None);
+        assert_eq!(main_window_builder(egui::ViewportBuilder::default()).inner_size, None);
+    }
+
+    #[test]
+    fn a_maximized_window_maximizes_once_shown_on_windows() {
+        let built = main_window_builder(egui::ViewportBuilder::default().with_maximized(true));
+        assert_eq!(built.maximized.is_none(), cfg!(windows));
+        assert_eq!(take_maximize_when_shown(), cfg!(windows));
+        assert!(!take_maximize_when_shown(), "once");
     }
 }

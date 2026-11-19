@@ -967,7 +967,7 @@ fn native_options(
         persist_window,
         persistence_path,
         window_builder: remembered_window
-            .then(|| Box::new(spotifast::window::at_least_min_size) as eframe::WindowBuilderHook),
+            .then(|| Box::new(spotifast::window::main_window_builder) as eframe::WindowBuilderHook),
         ..Default::default()
     }
 }
@@ -1385,6 +1385,9 @@ impl Shell {
         // unplugged since) comes back onto one.
         if !std::mem::replace(&mut self.recovery_checked, true) {
             fastframe_shell::window::recover_offscreen(ctx, frame);
+            if spotifast::window::take_maximize_when_shown() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
+            }
         }
         self.read_screen_hz(ctx, frame);
         let app = &mut *self.app;
