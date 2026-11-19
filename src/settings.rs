@@ -601,7 +601,7 @@ impl Default for Settings {
             zoom: 1.0,
             winamp_window: false,
             winamp_show_taskbar: true,
-            custom_titlebar: false,
+            custom_titlebar: true,
             // New installs open the mini player in our own wide skin; a file
             // that says null keeps the classic one it chose.
             skin: Some(crate::skin::WIDE.into()),

@@ -18986,6 +18986,7 @@ mod tests {
     fn choosing_the_custom_title_bar_recreates_only_the_main_window() {
         let mut app = headless_app();
         let ctx = egui::Context::default();
+        app.settings.custom_titlebar = false;
         app.apply(Action::SetCustomTitlebar(true), &ctx);
         assert!(app.settings.custom_titlebar);
         assert!(app.switch_intent, "the main window is replaced");
