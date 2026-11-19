@@ -2063,6 +2063,10 @@ pub struct SessionState {
     /// What was playing when the app closed, to resume from a cold start.
     pub last_context: Option<String>,
     pub last_track: Option<String>,
+    /// `last_track`'s details, so the bar shows it from the first frame,
+    /// before Spotify answers or while offline.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_track_info: Option<crate::api::models::Track>,
     pub last_position_ms: u32,
     /// Manually queued songs to restore with the remembered track.
     ///

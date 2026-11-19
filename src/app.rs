@@ -1437,7 +1437,11 @@ impl App {
             hidden_songs_revision: 0,
             hidden_songs_generation: 0,
             hidden_songs_requested: false,
-            track_cache: HashMap::new(),
+            track_cache: session
+                .last_track_info
+                .iter()
+                .filter_map(|track| Some((track.id.clone()?, track.clone())))
+                .collect(),
             track_requests: HashSet::new(),
             album_types_requested: HashSet::new(),
             audiobook_shows: HashSet::new(),
@@ -4338,6 +4342,25 @@ impl App {
         self.backend.api(ApiRequest::Track { id });
     }
 
+    /// Whether a song shown as playing is one to resume next start: this
+    /// computer's own playback, not another device's state Spotify reports
+    /// (a phone, or what Spotify last knew before Soloist came up). A local
+    /// file in mixed playback is an interlude; the Soloist song it sits in
+    /// stays the resume point, since Soloist cannot start a context at it.
+    fn resumes_from(&self, local: bool, uri: &str) -> bool {
+        if self.mixed_playback() && crate::twerkz::mixed::is_local(uri) {
+            return false;
+        }
+        local
+            || self.soloist_device_id.as_deref().is_some_and(|own| {
+                self.remote
+                    .as_ref()
+                    .and_then(|remote| remote.state.device.as_ref())
+                    .and_then(|device| device.id.as_deref())
+                    == Some(own)
+            })
+    }
+
     /// Whether the player bar shows the remembered track without live playback.
     fn resume_only(&self) -> bool {
         self.resume_track.is_some() && self.now_playing_live().is_none()
@@ -4370,7 +4393,12 @@ impl App {
     /// a song radio as plain text because a station has no page. A context
     /// whose name has not loaded is still named by kind so it can open.
     pub fn playing_from(&self) -> Option<PlayingFrom> {
-        let context = self.playing_context_uri()?;
+        // The remembered song is shown paused in the playlist it played from.
+        let context = self.playing_context_uri().or_else(|| {
+            self.resume_only()
+                .then(|| self.resume_context.clone())
+                .flatten()
+        })?;
         if context.ends_with(":collection") {
             return Some(PlayingFrom {
                 name: gettext(self.locale, "Liked Songs").into_owned(),
@@ -4603,13 +4631,20 @@ impl App {
         // not hold the recommendation that followed it, starts at its first
         // song instead. Replace that with the song itself, before the saved
         // queue or the saved song learn of the detour (#856).
-        if now.local
-            && let Some((uri, position_ms)) = self.resume_load.take()
+        // Only the first song after a resume answers it: a later local song
+        // in mixed playback is the playlist moving on, not a detour.
+        if let Some((uri, position_ms)) = self.resume_load.take()
+            && now.local
+            && self.mixed.is_none()
+            && !crate::twerkz::mixed::is_local(&now.uri)
             && now.uri != uri
         {
             let mut request = PlayRequest::tracks(vec![uri]);
             request.position_ms = position_ms;
             self.play_request(request, false);
+            // The detour is not the listener leaving the playlist: keep it
+            // as the one to resume from.
+            self.assumed_context = None;
             return;
         }
         let same_uri = self.last_now_playing_uri.as_deref() == Some(now.uri.as_str());
@@ -4673,15 +4708,17 @@ impl App {
         if now.local {
             self.last_now_playing_sequence = self.local.track_sequence;
         }
-        // A state that arrives without a context (Spotify lags a song behind)
-        // must not wipe the playlist the run was in; only a request for a
-        // context-less play (assumed context) ends it.
-        let known = self.playing_context_uri();
-        if known.is_some() || self.assumed_context.is_some() {
-            self.resume_context = known;
+        if self.resumes_from(now.local, &now.uri) {
+            // A state that arrives without a context (Spotify lags a song
+            // behind) must not wipe the playlist the run was in; only a
+            // request for a context-less play (assumed context) ends it.
+            let known = self.playing_context_uri();
+            if known.is_some() || self.assumed_context.is_some() {
+                self.resume_context = known;
+            }
+            self.resume_track = Some(now.uri.clone());
+            self.resume_position_ms = 0;
         }
-        self.resume_track = Some(now.uri.clone());
-        self.resume_position_ms = 0;
         if now.local
             && !now.is_episode
             && let Some(id) = &now.id
@@ -16948,7 +16985,10 @@ impl App {
     fn save_session(&mut self) {
         self.session_dirty = false;
         self.last_session_save = Instant::now();
-        if let Some(now) = self.now_playing() {
+        if let Some(now) = self
+            .now_playing()
+            .filter(|now| self.resumes_from(now.local, &now.uri))
+        {
             // A paused song from a sorted view has no context to report, but
             // its playlist is still what it plays from (#1013).
             let same_song = self.resume_track.as_deref() == Some(now.uri.as_str());
@@ -16968,6 +17008,13 @@ impl App {
                 recent_contexts: self.recent_contexts.clone(),
                 last_context: self.resume_context.clone(),
                 last_track: self.resume_track.clone(),
+                last_track_info: self
+                    .resume_track
+                    .as_deref()
+                    .filter(|uri| uri.starts_with("spotify:track:"))
+                    .and_then(util::uri_id)
+                    .and_then(|id| self.track_cache.get(id))
+                    .cloned(),
                 last_position_ms: self.resume_position_ms,
                 collapsed_folders: self.collapsed_folders.clone(),
                 rootlist: self.rootlist_cache.clone(),
@@ -18555,6 +18602,49 @@ mod tests {
         app.handle_local(local("spotify:track:recommended"));
         assert_eq!(app.manual_queue, ["spotify:track:queued"]);
         assert!(app.backend.take_player_commands().is_empty());
+    }
+
+    /// A resume on Soloist answers itself with its first song, so a local
+    /// file the playlist reaches later never replays the resumed song alone.
+    #[test]
+    fn a_later_local_file_does_not_undo_a_soloist_resume() {
+        let mut app = headless_app();
+        app.local_ready = true;
+        app.resume_load = Some(("spotify:track:shine".into(), 0));
+        app.remote = Some(RemoteSnapshot {
+            state: PlaybackState {
+                item: Some(PlayableItem::Track(Track {
+                    uri: "spotify:track:shine".into(),
+                    ..Default::default()
+                })),
+                is_playing: true,
+                ..Default::default()
+            },
+            received_at: Instant::now(),
+        });
+        app.on_now_playing_changed();
+        assert!(app.resume_load.is_none(), "the first song answers the resume");
+
+        app.resume_load = Some(("spotify:track:shine".into(), 0));
+        app.handle_local(LocalState {
+            connected: true,
+            playback: Playback::Playing,
+            track: Some(crate::player::LocalTrack {
+                uri: "spotify:local:a:b:song:200".into(),
+                duration_ms: 200_000,
+                ..Default::default()
+            }),
+            track_sequence: 1,
+            ..Default::default()
+        });
+        assert!(
+            !app.backend
+                .take_player_commands()
+                .iter()
+                .any(|command| matches!(command, PlayerCommand::Load(_))),
+            "a local file is never a detour from the resumed song"
+        );
+        app.backend.shutdown();
     }
 
     /// Next, pressed while a resume loads, is not a detour to undo.
@@ -21764,6 +21854,8 @@ mod tests {
     fn the_remembered_song_is_shown_paused_at_its_position() {
         use crate::api::models::{Album, ArtistRef, Track};
         let mut app = headless_app();
+        // Test apps share a session file; another test's song is not this one's.
+        app.track_cache.clear();
         app.resume_track = Some("spotify:track:abc".into());
         app.resume_position_ms = 19_566;
         assert!(
@@ -21809,6 +21901,8 @@ mod tests {
     fn showing_the_remembered_song_keeps_its_position() {
         use crate::api::models::Track;
         let mut app = headless_app();
+        // Test apps share a session file; another test's song is not this one's.
+        app.track_cache.clear();
         app.resume_track = Some("spotify:track:abc".into());
         app.resume_position_ms = 19_566;
         app.track_cache.insert(
@@ -21834,6 +21928,8 @@ mod tests {
     #[test]
     fn seeking_the_remembered_song_moves_the_resume_point() {
         let mut app = headless_app();
+        // Test apps share a session file; another test's song is not this one's.
+        app.track_cache.clear();
         app.resume_track = Some("spotify:track:abc".into());
         app.resume_position_ms = 19_566;
         app.seek(90_000);
@@ -22614,6 +22710,84 @@ mod tests {
         assert!(queue_uris(&app).1.is_empty());
         app.backend.shutdown();
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// The last song shows in the bar from the first frame, paused in the
+    /// playlist it played from, before Spotify answers anything.
+    #[test]
+    fn the_last_song_and_its_playlist_show_at_start() {
+        let root = std::env::temp_dir().join(format!(
+            "spotifast-resume-shown-test-{}",
+            std::process::id()
+        ));
+        let dirs = || AppDirs {
+            config: root.join("config"),
+            state: root.join("state"),
+            cache: root.join("cache"),
+        };
+        std::fs::create_dir_all(&dirs().state).unwrap();
+        SessionState {
+            last_track: Some("spotify:track:a".into()),
+            last_context: Some("spotify:playlist:p".into()),
+            last_track_info: Some(Track {
+                id: Some("a".into()),
+                uri: "spotify:track:a".into(),
+                name: "Song A".into(),
+                duration_ms: 180_000,
+                ..Track::default()
+            }),
+            last_position_ms: 60_000,
+            ..SessionState::default()
+        }
+        .save(&dirs().session_file());
+        let mut app = App::new(
+            &Waker::default(),
+            dirs(),
+            Settings::default(),
+            AppOptions {
+                media_controls: false,
+                restore_sign_in: false,
+                tray: false,
+                autostart: false,
+            },
+        );
+        let now = app.now_playing().expect("the last song is shown");
+        assert_eq!((now.title.as_str(), now.position_ms, now.playing), ("Song A", 60_000, false));
+        let from = app.playing_from().expect("its playlist is named");
+        assert_eq!(from.page, Some(Page::Playlist("p".into())));
+        app.backend.shutdown();
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Another device's song, as Spotify reports it before Soloist is up,
+    /// is not what this computer resumes next time.
+    #[test]
+    fn another_devices_song_does_not_replace_the_resume_point() {
+        let mut app = headless_app();
+        app.resume_track = Some("spotify:track:mine".into());
+        app.resume_context = Some("spotify:playlist:p".into());
+        app.remote = Some(RemoteSnapshot {
+            state: PlaybackState {
+                device: Some(Device {
+                    id: Some("phone".into()),
+                    name: "Phone".into(),
+                    ..Default::default()
+                }),
+                item: Some(PlayableItem::Track(Track {
+                    uri: "spotify:track:theirs".into(),
+                    name: "Theirs".into(),
+                    ..Default::default()
+                })),
+                is_playing: true,
+                ..Default::default()
+            },
+            received_at: Instant::now(),
+        });
+        app.on_now_playing_changed();
+        app.save_session();
+        assert_eq!(app.resume_track.as_deref(), Some("spotify:track:mine"));
+        assert_eq!(app.resume_context.as_deref(), Some("spotify:playlist:p"));
+        app.backend.shutdown();
     }
 
     /// A pending addition is not restored after its track starts.
@@ -28629,6 +28803,8 @@ mod tests {
     #[test]
     fn playing_from_names_the_context_and_its_page() {
         let mut app = headless_app();
+        // Test apps share a session file; another test's song is not this one's.
+        app.resume_track = None;
         assert_eq!(app.playing_from(), None, "no context, no line");
         let assume = |app: &mut App, uri: &str| {
             app.assumed_context = Some(AssumedContext {
@@ -30114,6 +30290,9 @@ mod tests {
                 autostart: false,
             },
         );
+        // The session file is shared between tests: a song another test
+        // left must not show as this app's remembered one.
+        app.track_cache.clear();
         app.local_ready = true;
         app
     }
