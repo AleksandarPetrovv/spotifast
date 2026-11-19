@@ -11756,9 +11756,15 @@ impl App {
         let Some(id) = self.soloist_device_id.clone() else {
             return false;
         };
-        let position = self.now_playing().map_or(0, |now| now.position_ms);
-        if position > RESTART_BEFORE_PREVIOUS || !self.targets_own_soloist() {
+        if !self.targets_own_soloist() {
             return false;
+        }
+        // Past the start, Previous restarts the song here: Spotify's own
+        // Previous steps back through its history, which a mixed run's fresh
+        // plays leave out of step with the playlist.
+        if self.now_playing().map_or(0, |now| now.position_ms) > RESTART_BEFORE_PREVIOUS {
+            self.seek(0);
+            return true;
         }
         let Some(current) = self.mixed_last.clone() else {
             return false;
@@ -26159,6 +26165,39 @@ mod tests {
             ApiRequest::Remote { play: Some(play), .. } if play.offset_uri.as_deref() == Some(one)
         ));
         assert_eq!(app.intent_track.as_ref().unwrap().uri, one);
+        app.backend.shutdown();
+    }
+
+    /// Past the start, Previous restarts the song itself instead of handing
+    /// Spotify a Previous that walks Spotify's own history.
+    #[test]
+    fn previous_past_the_start_restarts_the_song() {
+        let (ctx, mut app) = mixed_app("mixed-previous-restart");
+        let (one, two) = ("spotify:track:one", "spotify:track:two");
+        app.mixed_list = vec![one.into(), two.into()];
+        app.mixed_last = Some(two.into());
+        app.remote = Some(RemoteSnapshot {
+            state: PlaybackState {
+                device: Some(Device {
+                    id: Some("own".into()),
+                    name: "owned".into(),
+                    ..Default::default()
+                }),
+                item: Some(PlayableItem::Track(Track {
+                    uri: two.into(),
+                    duration_ms: 200_000,
+                    ..Default::default()
+                })),
+                progress_ms: Some(60_000),
+                is_playing: true,
+                ..Default::default()
+            },
+            received_at: Instant::now(),
+        });
+        app.apply(Action::Previous, &ctx);
+        assert!(app.soloist_target.is_none(), "no skip through Spotify");
+        assert!(app.backend.take_remote_play_requests().is_empty());
+        assert_eq!(app.pending_remote_position.map(|(at, _)| at), Some(0));
         app.backend.shutdown();
     }
 
