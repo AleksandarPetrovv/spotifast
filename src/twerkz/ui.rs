@@ -1452,7 +1452,19 @@ pub fn emoji_settings(app: &mut App, ui: &mut Ui, needle: &str) -> bool {
         .get_or_insert_with(super::emoji::next_name)
         .clone();
     crate::ui::settings::section(ui, &palette, "Emoji", |ui| {
-        crate::ui::widgets::setting_row(ui, &palette, TITLE, DESCRIPTION, |ui| {
+        // The buttons side by side, the folder one with its icon, so the
+        // description wraps beside them or the row stacks before they meet.
+        let spacing = ui.spacing().item_spacing.x;
+        let mut labels = vec!["Open folder", "Choose font…"];
+        if next.is_some() {
+            labels.push("Use system emoji");
+        }
+        let buttons_width = labels
+            .iter()
+            .map(|label| theme::soft_button_width(ui, label) + spacing)
+            .sum::<f32>()
+            + 21.0;
+        crate::ui::widgets::setting_row_sized(ui, &palette, TITLE, DESCRIPTION, buttons_width, |ui| {
             ui.with_layout(egui::Layout::top_down(egui::Align::Max), |ui| {
                 theme::text(
                     ui,
